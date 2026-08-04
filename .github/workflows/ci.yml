@@ -41,18 +41,12 @@ jobs:
             exit 0
           fi
 
-          version=$(grep -oP '"\K[^"]+' src/__version__.py)
-          if [ -z "$version" ]; then
-            echo "::error::Failed to parse __version__ from src/__version__.py"
-            exit 1
-          fi
+          # Reads + semver-validates in one place, shared with release.yml. Do NOT
+          # inline a parse here: the two inlined copies this replaced were both
+          # unanchored and matched the module docstring. See the script's header.
+          version=$(bash .github/scripts/read-version.sh) || exit 1
 
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::__version__ '$version' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])"
-            exit 1
-          fi
-
-          # Re-match the base branch (the semver test above clobbered BASH_REMATCH)
+          # Re-match the base branch (the regex test above clobbered BASH_REMATCH)
           # to recover the expected X.Y line, then compare to the version's line.
           [[ "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]
           expected_minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"

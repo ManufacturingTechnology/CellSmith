@@ -35,6 +35,35 @@ pip-venv onefile build):
     |---|---|---|
     | `auto-activate-base: false` | `auto-activate: false` | `auto-activate-base` is deprecated in favour of `auto-activate` (its default is now the sentinel `legacy-placeholder`). Each job also sets `activate-environment: CellSmithEnv`, so no `activate-environment: base` companion is needed. |
     | *(absent)* | `conda-remove-defaults: true` | Otherwise the action adds the `defaults` channel implicitly and annotates. `packaging/environment.yml` lists **`conda-forge` only**, deliberately — a silent `defaults` channel is exactly how a differently-licensed or differently-built package (the MKL story, L4/R5) sneaks back in. The action will default this to `true` itself eventually; setting it explicitly makes the intent readable. |
+- ⭐ **Version reading is a SHARED SCRIPT, `.github/scripts/read-version.sh`** — never
+  inline a parse of `src/__version__.py` in a workflow. Both workflows used to inline
+
+    ```bash
+    version=$(grep -oP '"\K[^"]+' src/__version__.py)
+    ```
+
+    which is **unanchored**: `src/__version__.py` opens with a module docstring, so the
+    third quote of its triple-quote opener starts a match and the docstring's first line
+    comes out *ahead of* the version. The guard therefore never worked, and the first PR
+    into a `release/X.Y` branch died on it:
+
+    ```text
+    Error: __version__ 'Single source of truth for the application version.
+    0.1.0-alpha.1' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])
+    ```
+
+    Two copies, both wrong the same way — which is the argument for one reader. It reads,
+    semver-validates, and hard-errors on **zero or more than one** assignment (`exec`-based
+    readers keep the *last*, a text parse takes the *first*, so two assignments mean the
+    git tag and the payload could disagree). Diagnostics go to stderr so `$(...)` stays
+    clean. The four `exec`-and-print readers — `build.bat`, `makefile`,
+    `packaging/debian/make_deb.sh`, `cellsmith.spec` — never had the bug.
+
+    ⚠️ **It uses POSIX `sed`, not `grep -P`, deliberately.** PCRE grep is not portable:
+    Git Bash on Windows refuses it outright — `grep: -P supports only unibyte and UTF-8
+    locales` — so a PCRE reader is untestable on a dev machine even though it works on the
+    runner. `tests/test_version_source.py` pins all of this (see
+    [testing.md](testing.md)).
 - **`build.bat`/`dev.bat` call bare `conda`**, which `setup-miniconda` only wires into the
   bash/pwsh profiles — so the Windows release job adds conda's dir to `$GITHUB_PATH`
   before the `shell: cmd` build step, or `dev.bat`'s `where conda` check fails.

@@ -71,6 +71,25 @@ three path-resolution bases, a `_WORKERS`-derived hiddenimports list, and an `ex
 copyleft or non-OSI package re-enters the environment (`CS-140` — Intel MKL arrived once as
 a transitive dependency of conda-forge's numpy and shipped 25 proprietary DLLs unnoticed).
 
+`tests/test_version_source.py` (**tier-1**, added `CS-158`) guards how the single source of
+truth `src/__version__.py` is *read*. Pure file reads — no bash, no PyInstaller, ~20 ms. It
+pins: exactly **one** `__version__` assignment (`exec` readers keep the last, text parsers
+the first — two assignments and the git tag could disagree with the payload); the value is
+semver; the text parse and `exec` agree; **no workflow re-inlines a version parse** (both
+did, and both were unanchored — they matched the module docstring, so the release guard had
+never worked); and the shared reader avoids **PCRE grep**, which Git Bash refuses. All four
+guards were **mutation-verified** — each was shown to fail when the defect it guards is
+reintroduced into a scratch copy of the tree. The origin story is in
+[packaging.md](packaging.md) → *Version reading is a SHARED SCRIPT*.
+
+!!! note "One test deliberately depends on the docstring existing"
+
+    `test_the_docstring_does_not_leak_into_an_anchored_parse` asserts
+    `src/__version__.py` still *opens with a docstring* — i.e. the quote collision the
+    anchoring defends against is still present. Delete that docstring and the test fails
+    with "docstring gone — this test no longer reproduces the collision it guards". That is
+    intentional: it forces a conscious decision rather than silently becoming a no-op test.
+
 What is still **not** covered by any test: that the *frozen* payload works. That is
 `.github/scripts/verify-payload.sh`, run by both workflows after PyInstaller — see
 [packaging.md](packaging.md).
