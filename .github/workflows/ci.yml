@@ -1,14 +1,18 @@
 name: CI
 
 # Pre-merge build check. Runs on PRs into the protected staging/release branches so
-# a PR can't merge unless CellSmith still freezes into a usable payload on both
-# shipped platforms. Mark `build-linux`, `build-windows`, `test-linux`,
-# `test-windows` and (on release/* branches) `version-check` as required status
-# checks (see CONTRIBUTING.md → Branch protection rules).
+# a PR can't merge unless CellSmith still builds into a usable, fully packaged
+# release on both shipped platforms. Mark `build-linux`, `build-windows`,
+# `test-linux`, `test-windows` and `version-check` as required status checks
+# (see CONTRIBUTING.md → Branch protection rules).
 #
-# DELIBERATELY NOT PACKAGED HERE: no .zip, no installer, no .deb, no artifact
-# upload. Those add ~15 minutes and only the release workflow needs them. What this
-# gate does instead is assert the frozen payload is USABLE — see the verify steps.
+# ⭐ THIS GATE RUNS THE FULL RELEASE BUILD (ADR-0009, changed 2026-08-04). It used
+# to skip the packaging — no .zip, no installer, no .deb — because that saved ~15
+# minutes. Both of the costliest defects of the first release push were in exactly
+# that skipped half. The build now lives in ONE composite action per OS, shared
+# verbatim with release.yml; only artifact upload and tagging are release-only.
+# Do not "optimize" this back into a cheaper build — see the ADR for the escape
+# hatch that is acceptable (a paths-filter or label gate for docs-only PRs).
 on:
   pull_request:
     branches: [main, 'dev/*', 'release/*']
