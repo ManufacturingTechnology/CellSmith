@@ -1,0 +1,128 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CellSmith",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": []
+        },
+        {
+            "name": "testA1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testA1.step"]
+        },
+        {
+            "name": "testB1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testB1.step"]
+        },
+        {
+            "name": "testB2",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testB2.step"]
+        },
+        {
+            "name": "testC1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testC1.step"]
+        },
+        {
+            "name": "testD1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testD1.obj"]
+        },
+        {
+            "name": "testE1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testE1.usd"]
+        },
+        {
+            "name": "testF1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testF1.step"]
+        },
+        {
+            "name": "testG1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testG1.step"]
+        },
+        {
+            "name": "CellSmith (+ refresh doc screenshots)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": [],
+            "preLaunchTask": "docs: refresh stale screenshots"
+        },
+        {
+            "name": "Docs: rebuild screenshots",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/docs/generate_screenshots.py",
+            "args": ["--force"],
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "env": { "QT_QPA_PLATFORM": "offscreen" }
+        }
+    ]
+}

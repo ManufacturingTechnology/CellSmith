@@ -1,0 +1,23 @@
+__pycache__/
+.claude/*.local.json
+# Per-session markers for the doc-flush gate (see .claude/skills/precompact)
+.claude/.flush/
+test_files/
+venv/
+*.whl
+*.cellsmith.cache/
+*.cellsmith.json
+.env_setup.lock
+*crash.log
+build/
+dist/
+scratchpad/
+# Visual-test artifacts: goldens + authored counter-examples ARE committed;
+# per-run actual/diff renders are not (see AI/Scratch/ai-metaanalysis.md 3.1.8).
+docs/src/**/_images/**/actual-*.png
+docs/src/**/_images/**/diff-*.png
+tests/_artifacts/
+tests/fixtures/private/
+
+# Generated doc screenshots (build output - see docs/generate_screenshots.py)
+docs/src/_screenshots/

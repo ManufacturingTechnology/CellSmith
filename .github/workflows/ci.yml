@@ -1,0 +1,183 @@
+name: CI
+
+# Pre-merge build check. Runs on PRs into the protected staging/release branches so
+# a PR can't merge unless CellSmith still freezes into a usable payload on both
+# shipped platforms. Mark `build-linux`, `build-windows`, `test-linux`,
+# `test-windows` and (on release/* branches) `version-check` as required status
+# checks (see CONTRIBUTING.md → Branch protection rules).
+#
+# DELIBERATELY NOT PACKAGED HERE: no .zip, no installer, no .deb, no artifact
+# upload. Those add ~15 minutes and only the release workflow needs them. What this
+# gate does instead is assert the frozen payload is USABLE — see the verify steps.
+on:
+  pull_request:
+    branches: [main, 'dev/*', 'release/*']
+
+# A new push to the same PR cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Nothing in CI has a display or a GPU driver.
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  version-check:
+    # Pre-merge guard for release PRs: a PR into release/X.Y must carry a matching
+    # X.Y version, so the post-merge release workflow can't fail on a
+    # version/branch mismatch. No-op for PRs into main / dev/*.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate __version__ matches the target release branch
+        run: |
+          base="${{ github.base_ref }}"
+          if [[ ! "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Base branch '$base' is not a release branch; skipping version check."
+            exit 0
+          fi
+
+          version=$(grep -oP '"\K[^"]+' src/__version__.py)
+          if [ -z "$version" ]; then
+            echo "::error::Failed to parse __version__ from src/__version__.py"
+            exit 1
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::__version__ '$version' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])"
+            exit 1
+          fi
+
+          # Re-match the base branch (the semver test above clobbered BASH_REMATCH)
+          # to recover the expected X.Y line, then compare to the version's line.
+          [[ "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]
+          expected_minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          actual_minor=$(echo "$version" | cut -d'-' -f1 | cut -d. -f1-2)
+          if [ "$expected_minor" != "$actual_minor" ]; then
+            echo "::error::PR targets '$base' which expects version $expected_minor.x, but __version__ is '$version'"
+            exit 1
+          fi
+
+          echo "OK: __version__ '$version' matches target branch '$base'."
+
+  test-linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}          # -l so conda's shell hook is active
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the system libraries offscreen rendering needs
+        # NOT optional and NOT inferable: VTK segfaults without a GL backend
+        # (libegl1) rather than raising, and Qt needs the xcb set even under
+        # QT_QPA_PLATFORM=offscreen. Verified list: Reference/testing.md.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libglx-mesa0 libgl1-mesa-dri \
+            libglib2.0-0t64 libxkbcommon0 libxkbcommon-x11-0 libxrender1 \
+            libxext6 libfontconfig1 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          environment-file: packaging/environment.yml
+          activate-environment: CellSmithEnv
+          auto-activate: false        # `auto-activate-base` is deprecated
+          conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
+      - name: Run the CI-eligible tier
+        # Marker polarity: a test is CI-eligible BY DEFAULT and must opt out with
+        # @pytest.mark.local_only, so a forgotten marker fails loudly here.
+        run: pytest -m "not local_only" -q
+
+  test-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          environment-file: packaging/environment.yml
+          activate-environment: CellSmithEnv
+          auto-activate: false        # `auto-activate-base` is deprecated
+          conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
+      - name: Run the CI-eligible tier (minus `gl` — see below)
+        # ⛔ `gl` IS DESELECTED HERE, AND ONLY HERE. windows-latest has no GPU and
+        # no software OpenGL that VTK 9 can use: Windows' fallback opengl32.dll is
+        # the GDI generic renderer (OpenGL 1.1), while VTK's OpenGL2 backend needs
+        # 3.2+. It does not raise — `pv.Plotter.screenshot()` takes an access
+        # violation and the runner dies with exit 139, so no test can catch it.
+        #
+        # NOT fixed by LIBGL_ALWAYS_SOFTWARE=1 (which used to be set here): that is
+        # a *Mesa* variable and Windows VTK goes through WGL, never Mesa.
+        #
+        # The `gl` tier is still covered — the Linux job above runs it for real via
+        # libegl1 (Reference/testing.md documents that backend matrix). What this
+        # job uniquely covers is Windows-native behaviour of the non-GL tiers.
+        # To restore `gl` here, a Mesa3D llvmpipe opengl32.dll must be dropped
+        # beside python.exe; see status.md.
+        run: pytest -m "not local_only and not gl" -q
+
+  build-linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Report free disk space
+        # The conda env plus build/ plus dist/ is several GB on a runner with
+        # ~20-29 GB free. Printed so a future "no space left" failure is obvious.
+        run: df -h /
+      - name: Install the system libraries PySide6/VTK/OCC link against
+        # ⭐ INSTALL BEFORE BUILDING. PyInstaller's Qt hook IMPORTS PySide6 at
+        # build time to locate the Qt plugin dirs; if that import fails the hook
+        # silently collects NO plugins and produces a dist whose workers all pass
+        # but whose GUI dies with "no Qt platform plugin could be initialized".
+        # The verify step below checks for exactly that fingerprint.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 \
+            libxcb-xkb1 libxkbcommon-x11-0 libgl1 libegl1 libfontconfig1 \
+            libdbus-1-3 libxrender1 libxext6 libsm6 libice6 libglib2.0-0t64 \
+            libwayland-client0 libwayland-cursor0 libwayland-egl1 libx11-xcb1 \
+            libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxcursor1 libxi6 \
+            libxinerama1
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          environment-file: packaging/environment.yml
+          activate-environment: CellSmithEnv
+          auto-activate: false        # `auto-activate-base` is deprecated
+          conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
+      - name: Freeze (PyInstaller only — no packaging on the PR gate)
+        run: python -m PyInstaller packaging/cellsmith.spec --clean --noconfirm
+      - name: Verify the payload is usable
+        run: bash .github/scripts/verify-payload.sh dist/CellSmith CellSmith
+
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Report free disk space
+        shell: pwsh
+        run: Get-PSDrive C | Format-List Used, Free
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          environment-file: packaging/environment.yml
+          activate-environment: CellSmithEnv
+          auto-activate: false        # `auto-activate-base` is deprecated
+          conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
+      - name: Freeze (PyInstaller only — no zip, no installer on the PR gate)
+        run: python -m PyInstaller packaging/cellsmith.spec --clean --noconfirm
+      - name: Verify the payload is usable
+        run: bash .github/scripts/verify-payload.sh dist/CellSmith CellSmith.exe
