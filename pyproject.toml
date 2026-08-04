@@ -1,0 +1,49 @@
+# CellSmith — tool configuration.
+#
+# SCOPE, deliberately narrow: this file configures TOOLS. It is *not* the dependency
+# source of truth and must not become one. The environment is conda because
+# `pythonocc-core` has no pip wheel, so `packaging/environment.yml` owns dependencies.
+# Declaring them here too would create a second list that silently diverges.
+#
+# It must live in the repo ROOT: pytest derives `rootdir` from where it finds this
+# file by walking upward, and from anywhere else `testpaths` / `addopts` /
+# `--strict-markers` all stop applying (tested: moving it broke collection outright).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+# NOTE THE POLARITY: tests are CI-eligible BY DEFAULT and must be explicitly opted
+# OUT with `local_only`. A test whose author forgets to mark it therefore still runs
+# in CI (loud) rather than silently never running (quiet).
+markers = [
+    "local_only: needs a real display, GPU driver, or interactive input - excluded from `make test-ci`",
+    "slow: takes more than a few seconds; still CI-eligible",
+    "gl: renders through OpenGL offscreen (works headless, but needs libegl1 on Linux - see docs/src/AI/Reference/testing.md)",
+]
+
+addopts = "-ra --strict-markers --tb=short"
+
+# ---------------------------------------------------------------------------
+# PLANNED — see status.md CS-094: adopt ruff + mypy with strict settings.
+# Both read their config from this file, which is the reason to consolidate here.
+# Left commented rather than enabled: turning them on against ~35k unlinted lines
+# produces hundreds of findings at once, so they should be introduced deliberately.
+#
+# [tool.ruff]
+# line-length = 100
+# target-version = "py312"
+#
+# [tool.ruff.lint]
+# select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "TID"]
+#
+# [tool.ruff.lint.flake8-tidy-imports.banned-api]
+# # Enforce the layer isolation that is currently only a convention: OCC, VTK and
+# # USD imports each belong to their own layer.
+#
+# [tool.mypy]
+# python_version = "3.12"
+# strict = true
+# ---------------------------------------------------------------------------

@@ -1,0 +1,6 @@
+{
+    "editor.rulers": [120],
+    "git.openRepositoryInParentFolders": "always",
+    "git.autoRepositoryDetection": true,
+    "python.defaultInterpreterPath": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe"
+}

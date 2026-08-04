@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mkdir -p .claude/.flush"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "d=$(find CLAUDE.md docs/src/AI -type f -printf '%T@\\n' 2>/dev/null | sort -rn | head -1); d=${d%.*}; [ -z \"$d\" ] && exit 0; find src -type f -name '*.py' -newermt \"@$d\" 2>/dev/null | grep -q . && echo '{\"systemMessage\":\"Docs may be stale: a src/ file changed more recently than any doc. Update the matching docs/src/AI reference + status.md so the session stays compaction-safe.\"}' || true"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/precompact-gate.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/flush-mark.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

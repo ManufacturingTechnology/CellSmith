@@ -1,0 +1,10 @@
+Package: cellsmith
+Version: @VERSION@
+Section: graphics
+Priority: optional
+Architecture: amd64
+Installed-Size: @INSTALLED_SIZE@
+Maintainer: @MAINTAINER@
+Homepage: https://github.com/ManufacturingTechnology/CellSmith
+Depends: @DEPENDS@
+Description: A tool for transforming 3D models for manufacturing simulations.
