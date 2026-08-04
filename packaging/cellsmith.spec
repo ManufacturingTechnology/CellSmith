@@ -167,11 +167,33 @@ a = Analysis(
     # GPL-3.0-only with NO linking exception, so distributing it would be
     # inconsistent with CellSmith's Apache-2.0 terms. It exists in the conda Linux
     # env (python links it) but CellSmith is a GUI app with no REPL and imports it
-    # nowhere, so nothing is lost. `.github/scripts/verify-payload.sh` asserts it
+    # nowhere, so nothing is lost. ⚠️ `excludes=` alone is NOT sufficient — see the
+    # binary-list filter below. `.github/scripts/verify-payload.sh` asserts it
     # really is absent, and packaging/gen_third_party_notices.py records the
     # exclusion as the resolution. See Reference/licensing.md.
     excludes=["PyQt5", "PyQt6", "tkinter", "readline"],
 )
+
+# --- readline, part 2: the exclusion must be enforced on a.binaries too ------
+# ⛔ `excludes=` operates on the MODULE GRAPH only. It cannot touch a shared
+# library that PyInstaller's own dependency analysis pulls in because some OTHER
+# collected binary lists it in DT_NEEDED — and that is exactly how GNU Readline
+# reached the Linux payload (CI build-linux, 2026-08-04: verify-payload.sh found
+# 3 hits under _internal/ with `readline` already in excludes=). Filtering the
+# TOC lists in the spec is PyInstaller's documented mechanism for removing files
+# that analysis insisted on:
+#   https://pyinstaller.org/en/stable/spec-files.html#giving-run-time-python-options
+#   (spec lists are plain lists of (dest, src, typecode) tuples — filter them)
+# libhistory ships from the same GPL-3.0-only readline source package, so it goes
+# with it. The verifier checks for both, and additionally warns if any REMAINING
+# binary still NEEDs them (which would mean removal broke a real dependency).
+_GPL_READLINE = ("readline", "libreadline", "libhistory")
+_dropped = [b for b in a.binaries
+            if os.path.basename(b[0]).lower().startswith(_GPL_READLINE)]
+if _dropped:
+    a.binaries = [b for b in a.binaries if b not in _dropped]
+    print("cellsmith.spec: dropped GPL readline from the payload: "
+          + ", ".join(sorted(os.path.basename(b[0]) for b in _dropped)))
 
 pyz = PYZ(a.pure)
 

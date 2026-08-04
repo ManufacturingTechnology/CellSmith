@@ -235,11 +235,14 @@ _EXCLUDED_FROM_PAYLOAD: Dict[str, str] = {
     "readline": (
         "GNU Readline is **GPL-3.0-only with no linking exception**, which would be "
         "inconsistent with CellSmith's Apache-2.0 terms if it were distributed. "
-        "CellSmith is a GUI application with no REPL and imports it nowhere, so "
-        "`readline` is listed in the PyInstaller spec's `excludes=` and "
+        "CellSmith is a GUI application with no REPL and imports it nowhere, so it "
+        "is kept out of the distributable in two places: the PyInstaller spec lists "
+        "`readline` in `excludes=` (module graph) **and** filters `readline`, "
+        "`libreadline` and `libhistory` out of `a.binaries` (shared libraries, which "
+        "`excludes=` does not reach), while "
         "`.github/scripts/verify-payload.sh` asserts that no `readline` extension "
-        "module or `libreadline` library appears in the frozen payload. It is a "
-        "build-environment package only."
+        "module and no `libreadline`/`libhistory` library appears in the frozen "
+        "payload. It is a build-environment package only."
     ),
 }
 

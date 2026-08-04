@@ -213,6 +213,13 @@ def test_build_only_and_excluded_packages_are_documented_not_just_suppressed(
     spec_body = SPEC.read_text(encoding="utf-8")
     assert '"readline"' in spec_body, \
         "readline is claimed excluded but is not in the spec's excludes="
+    # ⚠️ `excludes=` filters the MODULE GRAPH only. The 2026-08-04 Linux CI build
+    # shipped libreadline anyway — PyInstaller's dependency analysis pulls it in as
+    # another binary's DT_NEEDED, which no module-level exclusion can reach. So the
+    # claim is only backed if the spec ALSO filters the binary list.
+    assert "a.binaries = [" in spec_body and "libhistory" in spec_body, \
+        "readline is claimed absent from the payload, but the spec does not filter " \
+        "it out of a.binaries — excludes= alone provably does not do it"
 
 
 # --------------------------------------------------------------------------

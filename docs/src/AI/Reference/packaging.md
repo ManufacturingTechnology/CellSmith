@@ -271,13 +271,33 @@ worker subprocesses; onefile would re-extract the ~1.4 GB payload per launch.
     check fail against a known-good Windows build; match on the `plugins/` segment under
     `PySide6` instead.
   - **`no GPL readline in the payload`** (added 2026-08-04) — asserts zero
-    `readline*.so` / `readline*.pyd` / `libreadline*` under `_internal/`. This is the
-    enforcement half of a **licensing** exclusion, not a size one: GNU Readline is
-    `GPL-3.0-only` with no linking exception, it exists in the conda **Linux** env
-    (`python` links it) and never appeared on Windows, and the generated notices now
-    *claim* it is absent. A claim in a legal notice needs a check behind it. The other
-    half is `excludes=["…", "readline"]` in `packaging/cellsmith.spec` — CellSmith is a
-    GUI app with no REPL and imports it nowhere. See [licensing.md](licensing.md).
+    `readline*.so*` / `readline*.pyd` / `libreadline*` / `libhistory*` under
+    `_internal/`. This is the enforcement half of a **licensing** exclusion, not a size
+    one: GNU Readline is `GPL-3.0-only` with no linking exception, it exists in the conda
+    **Linux** env (`python` links it) and never appeared on Windows, and the generated
+    notices *claim* it is absent. A claim in a legal notice needs a check behind it.
+    See [licensing.md](licensing.md).
+    - ⭐ **`excludes=` DOES NOT KEEP A SHARED LIBRARY OUT — the very first Linux run
+      proved it.** `build-linux` failed this check with **3 hits** while `readline` was
+      already in the spec's `excludes=`. `excludes=` filters the **module graph**;
+      PyInstaller's binary dependency analysis then collects `libreadline` anyway
+      because some other collected binary lists it in **`DT_NEEDED`** (on a stock
+      Debian layout the only such consumer is CPython's own `readline` extension
+      module — probed with `readelf -d` across `/usr/lib/x86_64-linux-gnu`). So the
+      spec now **also filters `a.binaries`** (dest basename starting `readline` /
+      `libreadline` / `libhistory`) and prints what it dropped. Filtering the TOC
+      lists is PyInstaller's documented mechanism for undoing analysis
+      ([spec-file docs](https://pyinstaller.org/en/stable/spec-files.html));
+      `COLLECT` accepts any "TOC-like iterable", so a plain list comprehension is
+      fine (verified against `PyInstaller/building/api.py`, 6.21.0).
+    - The check **names the offending files** and, when `readelf` is available, the
+      collected libraries whose `DT_NEEDED` pulled them in — a bare count ("3 hits")
+      is not actionable. It also warns in the **opposite** direction: if the payload is
+      clean but some bundled `.so` still `NEEDED` readline, that library will fail to
+      `dlopen`, i.e. the removal broke a real dependency. Both branches were probed
+      against synthetic payloads built from real ELF files under WSL.
+    - `libhistory` is in the patterns because it ships from the **same GPL-3.0-only
+      readline source package**; the notices name it too.
 - **Windows batch gotcha**: .bat files MUST be CRLF — an LF-only `build.bat`
   misparses under cmd.exe (adjacent lines merge; `call` targets "not recognized").
   Keep `call "%~dp0dev.bat"` absolute.

@@ -93,14 +93,50 @@ fonts=$(find "$INTERNAL" -path '*resources/fonts/*' -name 'OFL-*' 2>/dev/null | 
 
 # GNU Readline is GPL-3.0-only with NO linking exception, so shipping it would be
 # inconsistent with CellSmith's Apache-2.0 terms. It is in the conda Linux env
-# (python links it) and is kept out via the spec's `excludes=`. THIS is what makes
-# that exclusion a fact rather than an intention — the notices file claims readline
-# is absent, and a claim in a legal notice needs a check behind it.
+# (python links it) and is kept out by the spec (`excludes=` for the module PLUS an
+# a.binaries filter for the shared library — `excludes=` alone does NOT cover a lib
+# that PyInstaller pulls in as another binary's DT_NEEDED, which is how it reached
+# the 2026-08-04 Linux payload). THIS is what makes that exclusion a fact rather
+# than an intention — the notices file claims readline is absent, and a claim in a
+# legal notice needs a check behind it. libhistory ships from the same source
+# package and carries the same license, so it is checked too.
 readline_hits=$(find "$INTERNAL" \
-    \( -name 'readline*.so' -o -name 'readline*.pyd' -o -name 'libreadline*' \) \
-    2>/dev/null | wc -l)
-[ "$readline_hits" -eq 0 ]
-check $? "no GPL readline in the payload ($readline_hits hits)"
+    \( -name 'readline*.so*' -o -name 'readline*.pyd' \
+       -o -name 'libreadline*' -o -name 'libhistory*' \) \
+    2>/dev/null | sort)
+if [ -z "$readline_hits" ]; then n_readline=0
+else n_readline=$(printf '%s\n' "$readline_hits" | wc -l); fi
+
+# Who still NEEDs it? A bare count is not actionable, and the removal has a real
+# failure mode in the other direction: if a collected library genuinely links
+# libreadline, dropping the lib makes that library fail to dlopen at runtime.
+# Compute the reverse dependencies either way — as the diagnosis when a hit is
+# found, and as a warning when the payload is clean but a DT_NEEDED dangles.
+readline_needers=""
+if command -v readelf >/dev/null 2>&1; then
+    readline_needers=$(find "$INTERNAL" -name '*.so*' -type f -print0 2>/dev/null |
+        while IFS= read -r -d '' so; do
+            if readelf -d "$so" 2>/dev/null |
+                   grep -qE 'NEEDED.*(libreadline|libhistory)'; then
+                echo "${so#"$INTERNAL"/}"
+            fi
+        done | sort)
+fi
+
+[ "$n_readline" -eq 0 ]
+check $? "no GPL readline in the payload ($n_readline hits)"
+if [ "$n_readline" -ne 0 ]; then
+    while IFS= read -r h; do echo "         hit:   ${h#"$INTERNAL"/}"; done \
+        <<< "$readline_hits"
+    if [ -n "$readline_needers" ]; then
+        echo "         pulled in as a DT_NEEDED dependency of:"
+        echo "$readline_needers" | sed "s|^|         needs: |"
+        echo "         ^ excludes= cannot remove these — filter a.binaries in the spec"
+    fi
+elif [ -n "$readline_needers" ]; then
+    echo "::warning::readline is correctly absent, but these bundled libraries still \
+list it in DT_NEEDED and will fail to load at runtime: $(echo "$readline_needers" | tr '\n' ' ')"
+fi
 
 # ---------------------------------------------------------------- runtime
 version_out=$("$LAUNCHER" --version 2>&1)
