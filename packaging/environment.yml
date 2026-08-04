@@ -1,0 +1,54 @@
+name: CellSmithEnv
+channels:
+  - conda-forge
+dependencies:
+  # Pinned to 3.12: PySide6/pyvista pip wheels don't yet cover 3.14 (which conda
+  # otherwise resolves to).
+  - python=3.12
+  # novtk build is REQUIRED on Windows: the default "all" build bundles VTK ->
+  # viskores, whose header paths exceed the 260-char MAX_PATH limit and crash
+  # extraction. We don't use OCC's VTK viewer (our viewport is pyvista via pip).
+  - pythonocc-core=7.9.3=novtk_*
+  # ⭐ BLAS backend pinned to OpenBLAS, deliberately. conda-forge's DEFAULT for
+  # numpy on win-64 is `libblas=*=*_mkl`, which pulls Intel oneMKL: 25 extra DLLs
+  # under the proprietary Intel Simplified Software License (NOT an OSI license),
+  # all of which PyInstaller then bundles into the distributable — including
+  # `mkl_scalapack_*`/`mkl_blacs_*`/`mkl_cdft_*`, MPI cluster libraries with no
+  # possible use here. OpenBLAS is BSD-3-Clause. Removing MKL also drops `tbb`
+  # and `onemkl-license`. See `docs/src/AI/Reference/licensing.md` (L4/R5).
+  # If a future solve refuses this pin, `nomkl` is the coarser alternative.
+  - libblas=*=*openblas
+  - numpy
+  - pyyaml
+  - pydantic
+  # GUI + 3D viewport come from pip (conda-forge pyvistaqt lags); pythonocc-core
+  # MUST come from conda-forge (no pip wheel exists).
+  - pip
+  - pip:
+      - PySide6
+      - pyvista
+      - pyvistaqt
+      # USD authoring for the rigged-asset export (pxr). Pip wheel; no conda dep.
+      - usd-core
+      # Mesh-file import (OBJ/STL/USD + more) — the ADDITIVE, subordinate path to
+      # the B-rep/STEP workflow (priority #1). PIP-ONLY (NOT on conda-forge, like
+      # usd-core); Python 3.12 has prebuilt cp312 wheels for all of these, so NO
+      # source build / VS Build Tools / TBB compile is needed. manifold3d is
+      # OPTIONAL (only trimesh's boolean backend — the slicer prefers native
+      # slice/section); scipy + shapely + mapbox_earcut back trimesh's slicing +
+      # cap triangulation. If a future Python/arch lacks a manifold3d wheel, retry
+      # with: pip install manifold3d --config-settings=cmake.args="-DMANIFOLD_PAR=NONE"
+      # (the workaround the sibling coprocessor project uses).
+      - trimesh
+      - manifold3d
+      - mapbox_earcut
+      - scipy
+      - shapely
+      # Frozen distributable builds (build.bat / makefile). >=6 required: onedir
+      # _internal layout + parent-dir-preserving DLL collection (pxr needs it).
+      - pyinstaller>=6.10
+      # Test suite (`make test` / `make test-ci`). Pillow ships with pyvista but
+      # is named explicitly because the image-compare helpers depend on it.
+      - pytest>=8.0
+      - pytest-qt>=4.4
+      - pillow
