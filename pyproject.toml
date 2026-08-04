@@ -11,6 +11,16 @@
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# ⭐ WITHOUT THIS, `pytest` AND `python -m pytest` DISAGREE. Only the `-m` form
+# prepends the CWD to `sys.path`; a bare `pytest` prepends the *test file's*
+# directory (`tests/`), so `import src` raises ModuleNotFoundError. The makefile
+# and test.bat both use `python -m pytest`, so the whole suite passed locally
+# while CI — which runs a bare `pytest` — errored out in the `qapp` fixture.
+# `pythonpath` entries are resolved against rootdir, i.e. the repo root.
+# Ref: https://docs.pytest.org/en/stable/reference/reference.html#confval-pythonpath
+pythonpath = ["."]
+
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]

@@ -21,6 +21,19 @@ Verify against `tests/`, `pytest.ini`, `Makefile`, `test.bat`, `test-ci.bat`; ma
 `make` is not on `PATH` in PowerShell here, which is why the `.bat` wrappers exist. Both
 wrappers auto-locate `conda.exe` and set `QT_QPA_PLATFORM=offscreen`.
 
+### ⭐ `pytest` and `python -m pytest` are NOT interchangeable
+
+Only `python -m pytest` prepends the **CWD** to `sys.path`. A bare `pytest` prepends the
+*test file's* directory (`tests/`), so `import src` raises `ModuleNotFoundError`. The
+makefile and `test.bat` both use the `-m` form; CI ran a bare `pytest` — so the entire
+suite was green locally while `test-linux`/`test-windows` errored in the `qapp` fixture at
+`from src.gui.theme import apply_dark` (2026-08-04, first CI run).
+
+Fixed by [`pythonpath = ["."]`](https://docs.pytest.org/en/stable/reference/reference.html#confval-pythonpath)
+in `pyproject.toml` (resolved against rootdir), which makes **both** invocations behave the
+same. Do not "fix" this by changing CI to `python -m pytest` — that leaves the divergence in
+place for the next person who types `pytest`.
+
 ## Marker polarity — the one design decision to know
 
 A test is **CI-eligible BY DEFAULT** and must opt out with `@pytest.mark.local_only`.
@@ -31,7 +44,7 @@ rather than silently never running. Markers (registered in `pyproject.toml`, enf
 | Marker | Meaning |
 |---|---|
 | `local_only` | needs a real display, GPU driver, or interactive input — excluded from `make test-ci` |
-| `gl` | renders through OpenGL offscreen; **still CI-eligible**, but see the dependency table |
+| `gl` | renders through OpenGL offscreen; **CI-eligible on Linux**, deselected on the Windows runner — see below |
 | `slow` | more than a few seconds; still CI-eligible |
 
 ## Three tiers
@@ -129,6 +142,50 @@ make test-ci
 # If a test needs a native window (full-window capture), wrap it:
 xvfb-run -a make test-ci
 ```
+
+### ⛔ `windows-latest` has no OpenGL VTK can use — `gl` is deselected there
+
+`.github/workflows/ci.yml`'s **Windows** job runs `-m "not local_only and not gl"`; the
+Linux job runs the full `-m "not local_only"`. The runner has no GPU, and Windows' fallback
+`opengl32.dll` is the GDI **generic** renderer (OpenGL 1.1) while VTK 9's OpenGL2 backend
+needs 3.2+. Same failure shape as the Linux one above — `pv.Plotter.screenshot()` takes an
+**access violation** and the runner dies with exit 139, so no test can catch it.
+
+Two traps this cost a red CI run to learn (2026-08-04):
+
+1. **`LIBGL_ALWAYS_SOFTWARE=1` does nothing on Windows.** It was set on that job, which made
+   it *look* like software rendering was handled. It is a **Mesa** variable; Windows VTK
+   goes through WGL and never consults Mesa. Removed.
+2. **The Linux fix does not transfer.** `libegl1` is what rescues the Linux runner; there is
+   no apt on Windows and no equivalent already-present backend.
+
+❓ **Untested:** dropping a Mesa3D **llvmpipe `opengl32.dll`** beside `python.exe` to give
+the Windows runner a real software GL. That is what would restore `gl` coverage there; it
+needs a new CI download step, so it was not done unilaterally. `CS-155`.
+
+### Reproducing a Linux-only failure from Windows — feed the code a synthetic input
+
+The 2026-08-04 licensing failure (`CS-153`) existed **only** on Linux: conda's Linux
+toolchain carries eight GPL-3.0 rows the Windows env has never had. The instinct is "I
+need a Linux box to verify this fix". Often you do not — the failing code read one input,
+and that input is forgeable:
+
+```bash
+# gen_third_party_notices.py takes --prefix; conda-meta is just a directory of JSON.
+# Write the exact offending rows into a scratch prefix and run the real generator on it.
+mkdir -p "$SCRATCH/conda-meta"
+# ... one {"name","version","license","build"} JSON per package ...
+python packaging/gen_third_party_notices.py --prefix "$SCRATCH" --out "$SCRATCH/N.md"
+```
+
+⭐ **Plant a control.** The synthetic set included one invented `GPL-3.0-or-later` package
+that *must still be reported*. Without it, "all eight resolved" is equally consistent with
+having broken the check entirely — the same vacuous-pass trap as `CS-150`(a). A fix that
+suppresses everything looks exactly like a fix that suppresses the right things.
+
+This works whenever the platform-specific thing is **data the code reads** (package
+metadata, a path listing, an env var) rather than platform-specific *behaviour* (the GL
+backend above — that one really does need the platform).
 
 ❓ Untested: Qt's `minimalegl` / `eglfs` platform plugins, which might provide a
 native-capable platform with no X server, removing the Xvfb dependency entirely.

@@ -23,6 +23,7 @@ GL, no OCC, ~1 s. CI-eligible (no `local_only` marker).
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -179,10 +180,38 @@ def test_build_is_onedir_and_windowed(spec_from_root: Tuple[_Rec, _Rec]) -> None
 
 def test_version_resource_is_written_under_the_repo_build_dir(
         spec_from_root: Tuple[_Rec, _Rec]) -> None:
-    """`EXE(version=)` anchors to the SPEC dir, so this must be absolute."""
+    """The spec must WRITE the VSVersionInfo file on every platform.
+
+    Asserted against the file the spec writes, not against `EXE(version=)`: the
+    resource is a Windows PE concept, so the spec passes `version=None` on Linux
+    (see `test_version_resource_is_wired_into_exe_only_on_windows`). Checking the
+    kwarg alone made this a Windows-only test that failed on the Linux CI runner.
+    """
+    _run_spec(REPO)                       # side effect: writes build/version_info.txt
+    version_file = REPO / "build" / "version_info.txt"
+    assert version_file.exists(), f"spec did not write {version_file}"
+    body = version_file.read_text(encoding="utf-8")
+    assert "CellSmith.exe" in body
+    assert "VSVersionInfo(" in body
+
+
+def test_version_resource_is_wired_into_exe_only_on_windows(
+        spec_from_root: Tuple[_Rec, _Rec]) -> None:
+    """`EXE(version=)`/`EXE(icon=)` anchor to the SPEC dir, so they must be absolute.
+
+    Both are PE-format resources that PyInstaller ignores on Linux, and the spec
+    passes `None` there rather than a path — so the platform decides which branch
+    of this assertion applies.
+    """
     _analysis, exe = spec_from_root
     version_file = exe.kwargs.get("version")
+    if sys.platform != "win32":
+        assert version_file is None, \
+            f"EXE(version=) should be None off Windows, got {version_file!r}"
+        assert exe.kwargs.get("icon") is None
+        return
     assert version_file, "no VSVersionInfo file passed to EXE"
+    assert os.path.isabs(version_file)
     assert os.path.exists(version_file)
     assert Path(version_file).parent == REPO / "build"
     assert "CellSmith.exe" in Path(version_file).read_text(encoding="utf-8")

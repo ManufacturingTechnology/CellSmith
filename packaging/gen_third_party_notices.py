@@ -40,6 +40,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 from importlib import metadata
 from typing import Dict, List, Optional, Tuple
@@ -205,6 +206,85 @@ _NEEDS_DECISION = (
 _RESOLVED = {"freeimage", "freetype", "libfreetype", "libfreetype6",
              "pythonocc-core", "occt", "libiconv"}
 
+# --------------------------------------------------------------------------
+# Three further ways a `_NEEDS_DECISION` hit can be resolved. All THREE are
+# rendered into the notices (see `render()`), never silently suppressed — the
+# point is that a reader can audit the reasoning, and that a package which
+# arrives later for a *different* reason still shows up as a gap.
+#
+# Added 2026-08-04 after `test-linux` went red: conda's Linux toolchain drags in
+# eight GPL-3.0 rows that the Windows env simply does not have, so the substring
+# check above had never fired before CI ran on Linux.
+
+# 1. BUILD-ONLY — present in the build environment, never in `_internal/`.
+#    conda-meta describes the ENV, not the payload, so this distinction has to be
+#    made by hand.
+_BUILD_ONLY: Dict[str, str] = {
+    "ld_impl_linux-64": (
+        "GNU `ld` from binutils — the *linker*, used only while conda builds and "
+        "installs packages. PyInstaller does not link anything and never copies it "
+        "into `_internal/`, so it is not distributed and its GPL-3.0 terms do not "
+        "reach the payload."
+    ),
+}
+
+# 2. EXCLUDED FROM THE PAYLOAD — genuinely GPL with no exception, so it is kept
+#    out of the build rather than argued about. Enforced in two places:
+#    `packaging/cellsmith.spec` (`excludes=`) and `.github/scripts/verify-payload.sh`.
+_EXCLUDED_FROM_PAYLOAD: Dict[str, str] = {
+    "readline": (
+        "GNU Readline is **GPL-3.0-only with no linking exception**, which would be "
+        "inconsistent with CellSmith's Apache-2.0 terms if it were distributed. "
+        "CellSmith is a GUI application with no REPL and imports it nowhere, so "
+        "`readline` is listed in the PyInstaller spec's `excludes=` and "
+        "`.github/scripts/verify-payload.sh` asserts that no `readline` extension "
+        "module or `libreadline` library appears in the frozen payload. It is a "
+        "build-environment package only."
+    ),
+}
+
+# 3. A LINKING / RUNTIME EXCEPTION on the license itself. SPDX spells these
+#    `<license> WITH <exception-id>`, and the exception is precisely the grant that
+#    makes the component usable from non-GPL code — treating it as a gap is a
+#    false positive of the substring match.
+#
+#    The case that matters here is the six GCC runtime libraries (libgcc, libgcc-ng,
+#    libgomp, libstdcxx, libgfortran, libgfortran5), all `GPL-3.0-only WITH
+#    GCC-exception-3.1`. The GCC Runtime Library Exception grants "unlimited
+#    permission to propagate" the runtime code as part of a compiled program
+#    regardless of that program's license — every non-GPL binary compiled by GCC on
+#    Linux relies on it.
+#    https://www.gnu.org/licenses/gcc-exception-3.1.html
+_EXCEPTION_RE = re.compile(r"\bWITH\s+([A-Za-z0-9.\-]*[Ee]xception[A-Za-z0-9.\-]*)")
+
+
+def _spdx_exception(license_str: str) -> Optional[str]:
+    """The SPDX exception id in `license_str`, or None."""
+    m = _EXCEPTION_RE.search(license_str or "")
+    return m.group(1) if m else None
+
+
+def unresolved_reason(row: Dict) -> Optional[str]:
+    """Why this conda row is an UNRESOLVED licensing item, or None if it is fine.
+
+    ⭐ ONE predicate, deliberately. `render()`'s Gaps section and
+    `tests/test_third_party_notices.py`'s rot guard both call it, so the shipped
+    notices and the test can never disagree about what counts as a gap — they used
+    to duplicate the rule, and a fix to one would have left the other lying.
+    """
+    name = row.get("name") or ""
+    lic = row.get("license") or ""
+    if name in _RESOLVED or name in _BUILD_ONLY or name in _EXCLUDED_FROM_PAYLOAD:
+        return None
+    if not any(tok in lic for tok in _NEEDS_DECISION):
+        return None
+    if _spdx_exception(lic):
+        return None
+    return (f"conda package {name} {row.get('version', '?')} is licensed "
+            f"'{lic}' - this needs a deliberate decision before shipping "
+            f"(see docs/src/AI/Reference/licensing.md)")
+
+
 WARN = "NOTICE-WARN: "
 
 
@@ -313,6 +393,63 @@ def collect_conda(prefix: str) -> List[Dict]:
     return out
 
 
+def _render_resolved_copyleft(a, conda_rows: List[Dict]) -> None:
+    """Document every copyleft row that `unresolved_reason()` clears, and why.
+
+    Driven off the LIVE environment rather than a hardcoded list, so a GCC bump
+    (16.1.0 -> whatever) needs no edit here, and a component that stops appearing
+    stops being claimed.
+    """
+    by_exception: List[Tuple[Dict, str]] = []
+    build_only: List[Dict] = []
+    excluded: List[Dict] = []
+    for r in conda_rows:
+        lic = r.get("license") or ""
+        if not any(tok in lic for tok in _NEEDS_DECISION):
+            continue
+        if r["name"] in _BUILD_ONLY:
+            build_only.append(r)
+        elif r["name"] in _EXCLUDED_FROM_PAYLOAD:
+            excluded.append(r)
+        elif r["name"] not in _RESOLVED and (exc := _spdx_exception(lic)):
+            by_exception.append((r, exc))
+
+    if not (by_exception or build_only or excluded):
+        return
+
+    a("### Copyleft components resolved by exception or by scope")
+    a("")
+    a("These packages carry a copyleft license in the build environment's metadata "
+      "but impose no obligation on this distribution, for the reason given. They are "
+      "listed here so the claim can be checked rather than taken on trust.")
+    a("")
+
+    if by_exception:
+        a("**Resolved by a license exception.** SPDX writes these as "
+          "`<license> WITH <exception>`; the exception is the grant that permits use "
+          "from code under another license.")
+        a("")
+        a("| Component | Version | License | Exception |")
+        a("|---|---|---|---|")
+        for r, exc in by_exception:
+            a(f"| {r['name']} | {r['version']} | `{r['license']}` | `{exc}` |")
+        a("")
+        a("The GCC runtime libraries above are covered by the "
+          "[GCC Runtime Library Exception version 3.1]"
+          "(https://www.gnu.org/licenses/gcc-exception-3.1.html), which grants "
+          "\"unlimited permission to propagate\" the runtime code as part of a "
+          "compiled program irrespective of that program's own license. They are "
+          "used unmodified.")
+        a("")
+
+    for rows, table in ((build_only, _BUILD_ONLY), (excluded, _EXCLUDED_FROM_PAYLOAD)):
+        for r in rows:
+            a(f"**{r['name']} {r['version']}** — `{r['license']}`")
+            a("")
+            a(table[r["name"]])
+            a("")
+
+
 def render(pip_rows, conda_rows, version: str) -> Tuple[str, List[str]]:
     gaps: List[str] = []
     L: List[str] = []
@@ -360,6 +497,11 @@ def render(pip_rows, conda_rows, version: str) -> Tuple[str, List[str]]:
         a("")
         a(ent["note"])
         a("")
+
+    # ---- copyleft rows resolved by scope or by a license exception ---------
+    # Rendered, not suppressed: a reader must be able to audit WHY each GPL row in
+    # the inventory below is not an obligation on this distribution.
+    _render_resolved_copyleft(a, conda_rows)
 
     a("### Written offer for source code (LGPL components)")
     a("")
@@ -421,13 +563,9 @@ def render(pip_rows, conda_rows, version: str) -> Tuple[str, List[str]]:
 
     # ---------------- gaps -------------------------------------------------
     for r in conda_rows:
-        lic = r["license"] or ""
-        if r["name"] in _RESOLVED:
-            continue
-        if any(tok in lic for tok in _NEEDS_DECISION):
-            _warn(f"conda package {r['name']} {r['version']} is licensed "
-                  f"'{lic}' - this needs a deliberate decision before shipping "
-                  f"(see docs/src/AI/Reference/licensing.md)", gaps)
+        reason = unresolved_reason(r)
+        if reason:
+            _warn(reason, gaps)
 
     a("## Gaps")
     a("")

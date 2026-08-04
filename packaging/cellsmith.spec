@@ -162,7 +162,15 @@ a = Analysis(
     ],
     # qtpy (via pyvistaqt) probes for every Qt binding — make sure a stray
     # PyQt install can never ride along beside PySide6.
-    excludes=["PyQt5", "PyQt6", "tkinter"],
+    #
+    # `readline` is a LICENSING exclusion, not a size one: GNU Readline is
+    # GPL-3.0-only with NO linking exception, so distributing it would be
+    # inconsistent with CellSmith's Apache-2.0 terms. It exists in the conda Linux
+    # env (python links it) but CellSmith is a GUI app with no REPL and imports it
+    # nowhere, so nothing is lost. `.github/scripts/verify-payload.sh` asserts it
+    # really is absent, and packaging/gen_third_party_notices.py records the
+    # exclusion as the resolution. See Reference/licensing.md.
+    excludes=["PyQt5", "PyQt6", "tkinter", "readline"],
 )
 
 pyz = PYZ(a.pure)

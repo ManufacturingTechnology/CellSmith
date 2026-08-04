@@ -193,6 +193,37 @@ sweep and the pytest suite pass alongside it.
     artifact all along. It stays in force until someone tests the windowed GUI and the
     frozen build; see the ⚠️ note there.
 
+### The Linux toolchain rows (2026-08-04) — three ways a copyleft row is resolved
+
+All of the analysis above was done on **Windows**. The first Linux CI run surfaced **eight
+GPL-3.0 conda rows the Windows env simply does not have**, and the rot guard
+(`test_environment_has_no_unresolved_copyleft_package`) failed on all eight. None turned
+out to be an obligation, but the reasons differ, and the generator now encodes each one
+**and renders it into the notices** — a copyleft row suppressed by name with no published
+reason is an unauditable licensing claim.
+
+| Rows | Resolution | Mechanism in `gen_third_party_notices.py` |
+|---|---|---|
+| `libgcc`, `libgcc-ng`, `libgomp`, `libstdcxx`, `libgfortran`, `libgfortran5` — all `GPL-3.0-only WITH GCC-exception-3.1` | The **[GCC Runtime Library Exception v3.1](https://www.gnu.org/licenses/gcc-exception-3.1.html)** grants "unlimited permission to propagate" the runtime as part of a compiled program regardless of that program's license. Every non-GPL binary compiled by GCC on Linux relies on it. | `_spdx_exception()` — a general rule: SPDX `<license> WITH <exception-id>` clears the check, because the exception *is* the grant. Rendered as a table naming each exception id. |
+| `ld_impl_linux-64` (`GPL-3.0-only`) | GNU `ld` from binutils — the **linker**, used only while conda installs packages. PyInstaller links nothing and never copies it into `_internal/`. | `_BUILD_ONLY` — name → prose reason. conda-meta describes the **environment**, not the payload; that distinction has to be made by hand. |
+| `readline 8.3` (`GPL-3.0-only`, **no exception**) | The one genuine conflict, had it shipped. Resolved by **keeping it out**: spec `excludes=`, plus a `verify-payload.sh` assertion. CellSmith has no REPL and imports it nowhere. | `_EXCLUDED_FROM_PAYLOAD` — name → prose reason. |
+
+!!! warning "The substring match was always going to do this"
+
+    `_NEEDS_DECISION` is a list of SPDX id **substrings**, so `"GPL-3.0-only"` matches
+    `"GPL-3.0-only WITH GCC-exception-3.1"`. That is a false positive of the matcher, not a
+    finding. The fix deliberately keeps the general rule (any linking/runtime exception
+    clears) rather than allowlisting the six GCC names, so a future `Classpath-exception` or
+    `LLVM-exception` package resolves the same way — and every one of them is **listed with
+    its exception id** in the shipped notices, so the reliance is visible.
+    `test_a_license_exception_resolves_a_gpl_row_but_bare_gpl_still_gaps` pins both halves:
+    the exception clears, a bare `GPL-3.0-only` still gaps.
+
+**One predicate, two callers.** `unresolved_reason(row)` is now the single definition of
+"this is a gap", called by both the generator's Gaps section and the test's rot guard. They
+used to be separate copies of the rule — a guarantee of eventual disagreement, in which the
+*test* would have been the one that looked right.
+
 ### Still open
 
 - **R1 — the only substantive one.** `LICENSE.TXT` is still the stock Apache text with

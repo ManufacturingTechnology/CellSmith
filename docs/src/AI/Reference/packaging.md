@@ -20,9 +20,21 @@ version-driven trigger, rulesets) is documented for humans in the repo-root
 pip-venv onefile build):
 
 - **conda, not `setup-python`** — `pythonocc-core` has no pip wheel.
-  `conda-incubator/setup-miniconda@v3` with `environment-file: packaging/environment.yml`.
+  `conda-incubator/setup-miniconda@v4` with `environment-file: packaging/environment.yml`.
   Miniconda is preinstalled on both runner images, but the action is what wires the shell
   hook. Every job uses `shell: bash -el {0}` so the env is active.
+
+    **Pinned at `@v4` (bumped from `@v3` 2026-08-04).** `v3` targets Node 20, which GitHub
+    has [deprecated](https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/)
+    and now force-runs on Node 24, annotating every job.
+    [`v4.0.0`](https://github.com/conda-incubator/setup-miniconda/releases/tag/v4.0.0)'s only
+    breaking changes are the Node 24 runtime and an ESM build — **no input was renamed or
+    removed** — so the bump is mechanical. Two inputs were corrected at the same time:
+
+    | Was | Now | Why |
+    |---|---|---|
+    | `auto-activate-base: false` | `auto-activate: false` | `auto-activate-base` is deprecated in favour of `auto-activate` (its default is now the sentinel `legacy-placeholder`). Each job also sets `activate-environment: CellSmithEnv`, so no `activate-environment: base` companion is needed. |
+    | *(absent)* | `conda-remove-defaults: true` | Otherwise the action adds the `defaults` channel implicitly and annotates. `packaging/environment.yml` lists **`conda-forge` only**, deliberately — a silent `defaults` channel is exactly how a differently-licensed or differently-built package (the MKL story, L4/R5) sneaks back in. The action will default this to `true` itself eventually; setting it explicitly makes the intent readable. |
 - **`build.bat`/`dev.bat` call bare `conda`**, which `setup-miniconda` only wires into the
   bash/pwsh profiles — so the Windows release job adds conda's dir to `$GITHUB_PATH`
   before the `shell: cmd` build step, or `dev.bat`'s `where conda` check fails.
@@ -258,6 +270,14 @@ worker subprocesses; onefile would re-extract the ~1.4 GB payload per launch.
     Windows, `_internal/PySide6/Qt/plugins/…` on Linux. An over-specific glob made the
     check fail against a known-good Windows build; match on the `plugins/` segment under
     `PySide6` instead.
+  - **`no GPL readline in the payload`** (added 2026-08-04) — asserts zero
+    `readline*.so` / `readline*.pyd` / `libreadline*` under `_internal/`. This is the
+    enforcement half of a **licensing** exclusion, not a size one: GNU Readline is
+    `GPL-3.0-only` with no linking exception, it exists in the conda **Linux** env
+    (`python` links it) and never appeared on Windows, and the generated notices now
+    *claim* it is absent. A claim in a legal notice needs a check behind it. The other
+    half is `excludes=["…", "readline"]` in `packaging/cellsmith.spec` — CellSmith is a
+    GUI app with no REPL and imports it nowhere. See [licensing.md](licensing.md).
 - **Windows batch gotcha**: .bat files MUST be CRLF — an LF-only `build.bat`
   misparses under cmd.exe (adjacent lines merge; `call` targets "not recognized").
   Keep `call "%~dp0dev.bat"` absolute.

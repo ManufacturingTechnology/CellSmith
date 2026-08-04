@@ -158,15 +158,61 @@ def test_build_tooling_is_acknowledged(notices: str) -> None:
 
 def test_environment_has_no_unresolved_copyleft_package(
         generator: ModuleType) -> None:
-    """The rot guard: catches Intel MKL (or any GPL package) coming back."""
-    offenders = [
-        f"{row['name']} {row['version']} [{row['license']}]"
-        for row in generator.collect_conda(sys.prefix)
-        if row["name"] not in generator._RESOLVED
-        and any(token in (row["license"] or "")
-                for token in generator._NEEDS_DECISION)
-    ]
+    """The rot guard: catches Intel MKL (or any GPL package) coming back.
+
+    Calls the generator's OWN predicate rather than re-implementing the rule. The
+    two used to be separate copies, which is a guarantee that they eventually
+    disagree — and the shipped notices, not the test, are the thing that has to be
+    right.
+    """
+    offenders = [f"{row['name']} {row['version']} [{row['license']}]"
+                 for row in generator.collect_conda(sys.prefix)
+                 if generator.unresolved_reason(row)]
     assert not offenders, f"unresolved copyleft/non-OSI packages: {offenders}"
+
+
+def test_a_license_exception_resolves_a_gpl_row_but_bare_gpl_still_gaps(
+        generator: ModuleType) -> None:
+    """The Linux-only false positive that took `test-linux` red (2026-08-04).
+
+    conda's Linux toolchain ships six GCC runtime libraries licensed
+    `GPL-3.0-only WITH GCC-exception-3.1`; a substring match for `GPL-3.0-only`
+    flags all of them. The exception is precisely the grant that permits linking
+    into non-GPL programs, so it must clear the check — WITHOUT also clearing a
+    bare GPL row, which is the assertion that keeps this from being a rubber stamp.
+    https://www.gnu.org/licenses/gcc-exception-3.1.html
+    """
+    exempt = {"name": "libgcc", "version": "16.1.0",
+              "license": "GPL-3.0-only WITH GCC-exception-3.1"}
+    bare = {"name": "some-new-package", "version": "1.0",
+            "license": "GPL-3.0-only"}
+    assert generator.unresolved_reason(exempt) is None
+    assert generator.unresolved_reason(bare), \
+        "a bare GPL-3.0 package must still be reported as a gap"
+    assert generator._spdx_exception(exempt["license"]) == "GCC-exception-3.1"
+    assert generator._spdx_exception(bare["license"]) is None
+
+
+def test_build_only_and_excluded_packages_are_documented_not_just_suppressed(
+        generator: ModuleType, notices: str) -> None:
+    """Every name-based resolution must carry its reasoning into the notices.
+
+    Suppressing a copyleft row by name with no published reason is how a licensing
+    claim becomes unauditable. `ld_impl_linux-64` is build-only (GNU `ld`, never in
+    `_internal/`) and `readline` is excluded from the payload outright.
+    """
+    for name in (*generator._BUILD_ONLY, *generator._EXCLUDED_FROM_PAYLOAD):
+        assert generator.unresolved_reason(
+            {"name": name, "version": "0", "license": "GPL-3.0-only"}) is None
+        reason = (generator._BUILD_ONLY.get(name)
+                  or generator._EXCLUDED_FROM_PAYLOAD[name])
+        assert len(reason) > 80, f"{name} resolved with no real explanation"
+
+    # `readline` must additionally be excluded by the thing that builds the payload,
+    # or the notices file would be asserting something no build enforces.
+    spec_body = SPEC.read_text(encoding="utf-8")
+    assert '"readline"' in spec_body, \
+        "readline is claimed excluded but is not in the spec's excludes="
 
 
 # --------------------------------------------------------------------------

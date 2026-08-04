@@ -91,6 +91,17 @@ fi
 fonts=$(find "$INTERNAL" -path '*resources/fonts/*' -name 'OFL-*' 2>/dev/null | wc -l)
 [ "$fonts" -ge 2 ]; check $? "OFL font notices ship beside the fonts ($fonts)"
 
+# GNU Readline is GPL-3.0-only with NO linking exception, so shipping it would be
+# inconsistent with CellSmith's Apache-2.0 terms. It is in the conda Linux env
+# (python links it) and is kept out via the spec's `excludes=`. THIS is what makes
+# that exclusion a fact rather than an intention — the notices file claims readline
+# is absent, and a claim in a legal notice needs a check behind it.
+readline_hits=$(find "$INTERNAL" \
+    \( -name 'readline*.so' -o -name 'readline*.pyd' -o -name 'libreadline*' \) \
+    2>/dev/null | wc -l)
+[ "$readline_hits" -eq 0 ]
+check $? "no GPL readline in the payload ($readline_hits hits)"
+
 # ---------------------------------------------------------------- runtime
 version_out=$("$LAUNCHER" --version 2>&1)
 rc=$?
