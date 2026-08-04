@@ -167,33 +167,63 @@ a = Analysis(
     # GPL-3.0-only with NO linking exception, so distributing it would be
     # inconsistent with CellSmith's Apache-2.0 terms. It exists in the conda Linux
     # env (python links it) but CellSmith is a GUI app with no REPL and imports it
-    # nowhere, so nothing is lost. ⚠️ `excludes=` alone is NOT sufficient — see the
-    # binary-list filter below. `.github/scripts/verify-payload.sh` asserts it
+    # nowhere, so nothing is lost. ⚠️ `excludes=` alone is NOT sufficient — TWO other
+    # routes ship it anyway; see the TOC filter below.
+    # `.github/scripts/verify-payload.sh` asserts it
     # really is absent, and packaging/gen_third_party_notices.py records the
     # exclusion as the resolution. See Reference/licensing.md.
     excludes=["PyQt5", "PyQt6", "tkinter", "readline"],
 )
 
-# --- readline, part 2: the exclusion must be enforced on a.binaries too ------
-# ⛔ `excludes=` operates on the MODULE GRAPH only. It cannot touch a shared
-# library that PyInstaller's own dependency analysis pulls in because some OTHER
-# collected binary lists it in DT_NEEDED — and that is exactly how GNU Readline
-# reached the Linux payload (CI build-linux, 2026-08-04: verify-payload.sh found
-# 3 hits under _internal/ with `readline` already in excludes=). Filtering the
-# TOC lists in the spec is PyInstaller's documented mechanism for removing files
-# that analysis insisted on:
-#   https://pyinstaller.org/en/stable/spec-files.html#giving-run-time-python-options
-#   (spec lists are plain lists of (dest, src, typecode) tuples — filter them)
+# --- readline, part 2: the exclusion must be enforced on the TOC LISTS -------
+# ⛔ `excludes=` operates on the MODULE GRAPH only, and GNU Readline reaches a
+# Linux payload by TWO routes that a module exclusion cannot touch. Both were
+# found by `.github/scripts/verify-payload.sh` on real CI builds, one per run:
+#
+#   a.binaries  the `readline` EXTENSION MODULE, collected by binary dependency
+#               analysis; it is what pulls libreadline in via DT_NEEDED.
+#               (CI 2026-08-04 run 1: 3 hits.)
+#   a.datas     ⭐ `libreadline.so{,.8}` + `libhistory.so{,.8}` — swept out of the
+#               conda env's shared `lib/` by PyInstaller's OWN numpy hook:
+#                   # PyInstaller/hooks/hook-numpy.py
+#                   if numpy_installer == 'conda':
+#                       datas += conda_support.collect_dynamic_libs(
+#                           "numpy", dependencies=True)
+#               `dependencies=True` walks numpy's conda dependency GRAPH
+#               (numpy → python → readline) and `collect_dynamic_libs` globs
+#               `*.so`/`*.so.*` out of `lib_dir`, symlinks included — hence all
+#               four files, and hence NOTHING in the payload lists them in
+#               DT_NEEDED. They are swept, not linked. (CI run 2: 4 hits, zero
+#               reverse dependencies — which is what identified the route.)
+#
+# COLLECT places files from exactly EXE + a.binaries + a.datas, so filtering
+# both lists is exhaustive. Filtering the TOC lists in the spec is PyInstaller's
+# documented mechanism for undoing what analysis insisted on:
+#   https://pyinstaller.org/en/stable/spec-files.html
 # libhistory ships from the same GPL-3.0-only readline source package, so it goes
 # with it. The verifier checks for both, and additionally warns if any REMAINING
 # binary still NEEDs them (which would mean removal broke a real dependency).
 _GPL_READLINE = ("readline", "libreadline", "libhistory")
-_dropped = [b for b in a.binaries
-            if os.path.basename(b[0]).lower().startswith(_GPL_READLINE)]
-if _dropped:
-    a.binaries = [b for b in a.binaries if b not in _dropped]
-    print("cellsmith.spec: dropped GPL readline from the payload: "
-          + ", ".join(sorted(os.path.basename(b[0]) for b in _dropped)))
+
+
+def _drop_gpl_readline(toc, label: str):
+    """Strip readline-family entries from one Analysis TOC list, loudly.
+
+    Prints the FULL entry (dest, src, typecode) for anything dropped: the source
+    path names the conda package or hook that contributed it, which is the only
+    thing that makes a future recurrence diagnosable in one CI run instead of two.
+    """
+    dropped = [e for e in toc
+               if os.path.basename(e[0]).lower().startswith(_GPL_READLINE)]
+    if not dropped:
+        return toc
+    for entry in dropped:
+        print(f"cellsmith.spec: dropped GPL readline from a.{label}: {entry}")
+    return [e for e in toc if e not in dropped]
+
+
+a.binaries = _drop_gpl_readline(a.binaries, "binaries")
+a.datas = _drop_gpl_readline(a.datas, "datas")
 
 pyz = PYZ(a.pure)
 

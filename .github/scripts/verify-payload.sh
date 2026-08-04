@@ -93,10 +93,11 @@ fonts=$(find "$INTERNAL" -path '*resources/fonts/*' -name 'OFL-*' 2>/dev/null | 
 
 # GNU Readline is GPL-3.0-only with NO linking exception, so shipping it would be
 # inconsistent with CellSmith's Apache-2.0 terms. It is in the conda Linux env
-# (python links it) and is kept out by the spec (`excludes=` for the module PLUS an
-# a.binaries filter for the shared library — `excludes=` alone does NOT cover a lib
-# that PyInstaller pulls in as another binary's DT_NEEDED, which is how it reached
-# the 2026-08-04 Linux payload). THIS is what makes that exclusion a fact rather
+# (python depends on it) and is kept out by the spec: `excludes=` for the module PLUS
+# a filter over BOTH a.binaries and a.datas. `excludes=` covers the module graph only,
+# and readline reached the 2026-08-04 Linux payload by both of the other two routes —
+# DT_NEEDED of the readline extension module (a.binaries), and PyInstaller's own numpy
+# hook sweeping the conda `lib/` dir into a.datas. THIS is what makes the exclusion a fact rather
 # than an intention — the notices file claims readline is absent, and a claim in a
 # legal notice needs a check behind it. libhistory ships from the same source
 # package and carries the same license, so it is checked too.
@@ -112,8 +113,15 @@ else n_readline=$(printf '%s\n' "$readline_hits" | wc -l); fi
 # libreadline, dropping the lib makes that library fail to dlopen at runtime.
 # Compute the reverse dependencies either way — as the diagnosis when a hit is
 # found, and as a warning when the payload is clean but a DT_NEEDED dangles.
+#
+# ⚠️ An EMPTY needers list is load-bearing evidence — it is what proved the 4 libs of
+# CI run 2 were swept out of the conda `lib/` by PyInstaller's numpy hook rather than
+# linked by anything. So say when the list is empty because `readelf` is missing, or
+# the two cases are indistinguishable in the log.
 readline_needers=""
+readelf_ran=0
 if command -v readelf >/dev/null 2>&1; then
+    readelf_ran=1
     readline_needers=$(find "$INTERNAL" -name '*.so*' -type f -print0 2>/dev/null |
         while IFS= read -r -d '' so; do
             if readelf -d "$so" 2>/dev/null |
@@ -121,6 +129,8 @@ if command -v readelf >/dev/null 2>&1; then
                 echo "${so#"$INTERNAL"/}"
             fi
         done | sort)
+else
+    echo "  info  readelf unavailable — DT_NEEDED reverse deps NOT computed"
 fi
 
 [ "$n_readline" -eq 0 ]
@@ -131,8 +141,12 @@ if [ "$n_readline" -ne 0 ]; then
     if [ -n "$readline_needers" ]; then
         echo "         pulled in as a DT_NEEDED dependency of:"
         echo "$readline_needers" | sed "s|^|         needs: |"
-        echo "         ^ excludes= cannot remove these — filter a.binaries in the spec"
+    elif [ "$readelf_ran" = 1 ]; then
+        echo "         nothing in the payload NEEDs them — they were SWEPT in, not"
+        echo "         linked (a hook globbing the conda lib/ dir into a.datas)"
     fi
+    echo "         ^ excludes= cannot remove either kind; the spec must filter"
+    echo "           a.binaries AND a.datas (see packaging/cellsmith.spec)"
 elif [ -n "$readline_needers" ]; then
     echo "::warning::readline is correctly absent, but these bundled libraries still \
 list it in DT_NEEDED and will fail to load at runtime: $(echo "$readline_needers" | tr '\n' ' ')"

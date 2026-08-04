@@ -277,25 +277,39 @@ worker subprocesses; onefile would re-extract the ~1.4 GB payload per launch.
     **Linux** env (`python` links it) and never appeared on Windows, and the generated
     notices *claim* it is absent. A claim in a legal notice needs a check behind it.
     See [licensing.md](licensing.md).
-    - ⭐ **`excludes=` DOES NOT KEEP A SHARED LIBRARY OUT — the very first Linux run
-      proved it.** `build-linux` failed this check with **3 hits** while `readline` was
-      already in the spec's `excludes=`. `excludes=` filters the **module graph**;
-      PyInstaller's binary dependency analysis then collects `libreadline` anyway
-      because some other collected binary lists it in **`DT_NEEDED`** (on a stock
-      Debian layout the only such consumer is CPython's own `readline` extension
-      module — probed with `readelf -d` across `/usr/lib/x86_64-linux-gnu`). So the
-      spec now **also filters `a.binaries`** (dest basename starting `readline` /
-      `libreadline` / `libhistory`) and prints what it dropped. Filtering the TOC
-      lists is PyInstaller's documented mechanism for undoing analysis
-      ([spec-file docs](https://pyinstaller.org/en/stable/spec-files.html));
-      `COLLECT` accepts any "TOC-like iterable", so a plain list comprehension is
-      fine (verified against `PyInstaller/building/api.py`, 6.21.0).
+    - ⭐ **`excludes=` DOES NOT KEEP A SHARED LIBRARY OUT — two Linux runs proved it,
+      by two different routes.** `readline` was in the spec's `excludes=` for both.
+      `excludes=` filters the **module graph**; the payload is assembled from
+      `a.binaries` + `a.datas`, and readline arrived in each:
+
+        | Run | Hits | Route |
+        |---|---|---|
+        | 1 | 3 — incl. `readline.cpython-312-…so` | **`a.binaries`.** Binary dependency analysis collected the `readline` **extension module**, which is what drags `libreadline` in via **`DT_NEEDED`**. (On a stock Debian layout it is the *only* consumer of `libreadline` — probed with `readelf -d` over `/usr/lib/x86_64-linux-gnu` + `lib-dynload`.) |
+        | 2 | 4 — `lib{readline,history}.so{,.8}`, **zero** reverse deps | **`a.datas`, and it is PyInstaller's OWN numpy hook.** `PyInstaller/hooks/hook-numpy.py` does `if numpy_installer == 'conda': datas += conda_support.collect_dynamic_libs("numpy", dependencies=True)`. `dependencies=True` walks numpy's conda dependency **graph** (numpy → python → readline) and `conda.collect_dynamic_libs` **globs `*.so`/`*.so.*` out of the env's shared `lib/`**, symlinks included (`resolved_file.is_file()` follows them) — hence all four files, and hence nothing NEEDs them. Swept, not linked. |
+
+      So the spec filters **both lists** (dest basename starting `readline` /
+      `libreadline` / `libhistory`), printing the full `(dest, src, typecode)` of every
+      entry it drops — the *source path* is what names the contributing package. Since
+      `COLLECT` places files from exactly `EXE` + `a.binaries` + `a.datas`, filtering
+      both is **exhaustive**. Filtering the TOC lists is PyInstaller's documented
+      mechanism for undoing analysis
+      ([spec-file docs](https://pyinstaller.org/en/stable/spec-files.html)); `COLLECT`
+      accepts any "TOC-like iterable", so a plain list is fine (verified against
+      `PyInstaller/building/api.py:1122`, 6.21.0).
+    - 💡 **Generalizable:** on a **conda** build, `hook-numpy` alone rakes the entire
+      env `lib/` for everything in numpy's dependency closure and files it as *data*.
+      Expect other env libraries in `_internal/` that nothing links, and do not assume
+      a payload file arrived because something imported or linked it.
     - The check **names the offending files** and, when `readelf` is available, the
       collected libraries whose `DT_NEEDED` pulled them in — a bare count ("3 hits")
-      is not actionable. It also warns in the **opposite** direction: if the payload is
-      clean but some bundled `.so` still `NEEDED` readline, that library will fail to
-      `dlopen`, i.e. the removal broke a real dependency. Both branches were probed
-      against synthetic payloads built from real ELF files under WSL.
+      is not actionable, and it cost a whole CI round-trip to learn the filenames.
+      An **empty** needers list is itself load-bearing evidence (it is what identified
+      route 2), so the script says explicitly when `readelf` is missing rather than
+      letting "didn't look" read as "nothing needs it". It also warns in the
+      **opposite** direction: payload clean but some bundled `.so` still `NEEDED`
+      readline ⇒ that library will fail to `dlopen`, i.e. the removal broke a real
+      dependency. All branches probed against synthetic payloads built from **real ELF
+      files** under WSL, including one shaped exactly like run 2.
     - `libhistory` is in the patterns because it ships from the **same GPL-3.0-only
       readline source package**; the notices name it too.
 - **Windows batch gotcha**: .bat files MUST be CRLF — an LF-only `build.bat`

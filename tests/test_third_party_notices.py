@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -213,13 +214,17 @@ def test_build_only_and_excluded_packages_are_documented_not_just_suppressed(
     spec_body = SPEC.read_text(encoding="utf-8")
     assert '"readline"' in spec_body, \
         "readline is claimed excluded but is not in the spec's excludes="
-    # ⚠️ `excludes=` filters the MODULE GRAPH only. The 2026-08-04 Linux CI build
-    # shipped libreadline anyway — PyInstaller's dependency analysis pulls it in as
-    # another binary's DT_NEEDED, which no module-level exclusion can reach. So the
-    # claim is only backed if the spec ALSO filters the binary list.
-    assert "a.binaries = [" in spec_body and "libhistory" in spec_body, \
-        "readline is claimed absent from the payload, but the spec does not filter " \
-        "it out of a.binaries — excludes= alone provably does not do it"
+    # ⚠️ `excludes=` filters the MODULE GRAPH only, and TWO Linux CI builds shipped
+    # readline anyway — once via DT_NEEDED of the readline extension module
+    # (`a.binaries`), once via PyInstaller's own numpy hook sweeping the conda `lib/`
+    # dir into `a.datas`. COLLECT draws from exactly those two lists, so the claim is
+    # only backed if the spec reassigns BOTH after filtering.
+    for _toc in ("a.binaries", "a.datas"):
+        assert re.search(rf"^{re.escape(_toc)} = ", spec_body, re.M), (
+            f"readline is claimed absent from the payload, but the spec never "
+            f"filters {_toc} — excludes= alone provably does not do it")
+    assert "libhistory" in spec_body, \
+        "libhistory ships from the same GPL-3.0-only readline package and must go too"
 
 
 # --------------------------------------------------------------------------

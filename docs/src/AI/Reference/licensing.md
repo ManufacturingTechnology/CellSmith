@@ -206,23 +206,35 @@ reason is an unauditable licensing claim.
 |---|---|---|
 | `libgcc`, `libgcc-ng`, `libgomp`, `libstdcxx`, `libgfortran`, `libgfortran5` — all `GPL-3.0-only WITH GCC-exception-3.1` | The **[GCC Runtime Library Exception v3.1](https://www.gnu.org/licenses/gcc-exception-3.1.html)** grants "unlimited permission to propagate" the runtime as part of a compiled program regardless of that program's license. Every non-GPL binary compiled by GCC on Linux relies on it. | `_spdx_exception()` — a general rule: SPDX `<license> WITH <exception-id>` clears the check, because the exception *is* the grant. Rendered as a table naming each exception id. |
 | `ld_impl_linux-64` (`GPL-3.0-only`) | GNU `ld` from binutils — the **linker**, used only while conda installs packages. PyInstaller links nothing and never copies it into `_internal/`. | `_BUILD_ONLY` — name → prose reason. conda-meta describes the **environment**, not the payload; that distinction has to be made by hand. |
-| `readline 8.3` (`GPL-3.0-only`, **no exception**) | The one genuine conflict — and it **did** ship: the first Linux CI build put 3 readline files in `_internal/`. Resolved by **keeping it out**, which takes *two* spec mechanisms (`excludes=` for the module + an `a.binaries` filter for the library) plus the `verify-payload.sh` assertion. CellSmith has no REPL and imports it nowhere. | `_EXCLUDED_FROM_PAYLOAD` — name → prose reason. |
+| `readline 8.3` (`GPL-3.0-only`, **no exception**) | The one genuine conflict — and it **did** ship, twice, by two different routes. Resolved by **keeping it out**, which takes *three* mechanisms (`excludes=` for the module + a filter over **both** `a.binaries` and `a.datas`) plus the `verify-payload.sh` assertion. CellSmith has no REPL and imports it nowhere. | `_EXCLUDED_FROM_PAYLOAD` — name → prose reason. |
 
-!!! danger "`excludes=` is not an exclusion for a shared library (2026-08-04, measured)"
+!!! danger "`excludes=` is not an exclusion for a shared library (2026-08-04, measured twice)"
 
     `readline` was in `packaging/cellsmith.spec`'s `excludes=` and the Linux payload
-    **still contained 3 readline files** — `verify-payload.sh` caught it on its first real
-    run, which is the whole reason that check exists. `excludes=` filters the **module
-    graph**; it has no effect on a library PyInstaller's dependency analysis collects
-    because another bundled binary names it in **`DT_NEEDED`**. The fix filters
-    `a.binaries` in the spec (`readline*` / `libreadline*` / `libhistory*`, printing what
-    it drops) and the verifier now names the hits *and* their reverse dependencies. See
-    [packaging.md](packaging.md) → *Payload verifier*.
+    contained it anyway — on **two consecutive CI runs**, arriving a different way each
+    time. `verify-payload.sh` caught both, which is the whole reason that check exists.
+    `excludes=` filters the **module graph**; the payload is assembled from `a.binaries`
+    + `a.datas`, and readline came in via each:
 
-    Two consequences for anything else on this page: **(1)** a resolution that says "the
-    spec excludes it" is not evidence — only the payload is; **(2)** `libhistory` ships
-    from the same GPL-3.0-only readline source package, so it is excluded and checked
-    alongside `libreadline`.
+    1. **`a.binaries`** — the `readline` *extension module*, collected by binary
+       dependency analysis; it is what pulls `libreadline` in via `DT_NEEDED`.
+    2. **`a.datas`** — `lib{readline,history}.so{,.8}` **swept out of the conda env's
+       `lib/` by PyInstaller's own numpy hook** (`conda_support.collect_dynamic_libs
+       ("numpy", dependencies=True)` walks numpy → python → readline and globs the
+       shared-lib dir). Nothing in the payload linked them.
+
+    The fix filters both lists in the spec and the verifier names the hits *and* their
+    reverse dependencies. See [packaging.md](packaging.md) → *Payload verifier* for the
+    full mechanism and the probe evidence.
+
+    Three consequences for anything else on this page: **(1)** a resolution that says
+    "the spec excludes it" is **not evidence** — only the payload is, and a claim in a
+    legal notice needs a check against the payload behind it; **(2)** on a conda build,
+    hooks sweep env libraries in wholesale, so a GPL library can land in `_internal/`
+    with **nothing importing or linking it** — "we don't use it" does not mean "we don't
+    distribute it", and distribution is what the license governs; **(3)** `libhistory`
+    ships from the same GPL-3.0-only readline source package, so it is excluded and
+    checked alongside `libreadline`.
 
 !!! warning "The substring match was always going to do this"
 
