@@ -35,16 +35,10 @@ jobs:
 
           branch="${GITHUB_REF_NAME}"
 
-          version=$(grep -oP '"\K[^"]+' src/__version__.py)
-          if [ -z "$version" ]; then
-            echo "::error::Failed to parse __version__ from src/__version__.py"
-            exit 1
-          fi
-
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::__version__ '$version' is not valid semver (expected MAJOR.MINOR.PATCH[-PRERELEASE])"
-            exit 1
-          fi
+          # Reads + semver-validates in one place, shared with ci.yml. Do NOT inline
+          # a parse here: the two inlined copies this replaced were both unanchored
+          # and matched the module docstring. See the script's header.
+          version=$(bash .github/scripts/read-version.sh)
 
           tag="v$version"
 
