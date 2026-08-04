@@ -69,15 +69,35 @@ runs:
     - name: Assert both Linux artifacts were produced
       # Cheap, and it belongs HERE rather than in release.yml's collect step: a
       # missing artifact is a build defect, so the gate must see it too.
-      shell: bash -el {0}
+      #
+      # ⛔ `shell: bash`, NOT `bash -el {0}` — this step only globs and stats
+      # files, so it has no business loading the conda login profile. The first
+      # version used a login shell plus `compgen -G`, printed BOTH ok lines, and
+      # still exited 1; that could not be reproduced under `bash -e -l` locally
+      # with the same script and the same filenames. So this version removes both
+      # unexplained variables (login profile, `compgen`) and — importantly —
+      # PRINTS ITS OWN VERDICT. If the log ever again shows "verdict: rc=0"
+      # followed by a failed step, the cause is provably the shell wrapper and
+      # not this script, which is the one thing the first version could not tell
+      # us. `shell: bash` is `bash --noprofile --norc -eo pipefail {0}`.
+      shell: bash
       run: |
-        set -uo pipefail
         rc=0
         for pat in "dist/CellSmith-v*-linux-x86_64.tar.gz" "dist/cellsmith_*_amd64.deb"; do
-          if compgen -G "$pat" > /dev/null; then
-            echo "  ok    $(ls -lh $pat | awk '{print $NF, "("$5")"}')"
+          # Unquoted glob. When nothing matches, bash leaves the pattern intact,
+          # so the -e test fails and `hit` stays empty. ⚠️ `[ -e "$f" ] && hit=$f`
+          # would abort the whole script under `set -e` on the no-match path —
+          # the same trap that made make_deb.sh's check() unreachable.
+          hit=""
+          for f in $pat; do
+            if [ -e "$f" ]; then hit="$f"; fi
+          done
+          if [ -n "$hit" ]; then
+            echo "  ok    $hit ($(du -h "$hit" | cut -f1))"
           else
-            echo "::error::no artifact matching $pat — see the build log"; rc=1
+            echo "::error::no artifact matching $pat — see the build log"
+            rc=1
           fi
         done
-        exit $rc
+        echo "verdict: rc=$rc"
+        exit "$rc"

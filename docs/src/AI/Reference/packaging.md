@@ -41,6 +41,28 @@ and the tag, none of which is release-branch-specific.
 escape hatch is a `paths`-filter or a label-gated job — **not** a cheaper build,
 which is the thing that failed.
 
+!!! warning "The artifact-assertion steps use `shell: bash`, deliberately — do not 'fix' them to `bash -el {0}`"
+
+    Every other step in these actions needs the conda env, so it uses
+    `shell: bash -el {0}` (a **login** shell — that is what activates `CellSmithEnv`).
+    The `Assert … artifacts were produced` steps only glob and stat files, and they
+    are pinned to plain `shell: bash` (`bash --noprofile --norc -eo pipefail {0}`).
+
+    Why: the first version of that step used a login shell plus `compgen -G`, printed
+    **both** `ok` lines, and **still exited 1** — with no `::error::` emitted, so `rc`
+    was provably never set to 1. It could not be reproduced locally (same script
+    extracted from the YAML, same filenames including the `~` in the `.deb` name, run
+    as `bash -e -l` → exit 0). CRLF, YAML mangling and a hidden third iteration were
+    ruled out by probe. **Root cause unknown ❓.** The step therefore drops both
+    unexplained variables (login profile, `compgen`) and **prints `verdict: rc=N`
+    before exiting** — so if it ever fails again, `verdict: rc=0` next to a failed
+    step proves the fault is in the shell wrapper rather than the script, which is
+    exactly what the first version could not tell us.
+
+    ⚠️ Its glob loop writes `if [ -e "$f" ]; then hit="$f"; fi`, never
+    `[ -e "$f" ] && hit="$f"` — under `-e` the no-match path would abort the script
+    instead of reporting the missing artifact. Same trap as the `.deb` self-checks.
+
 **CellSmith-specific adaptations** (none of these apply to MTConnectExplorer, which is a
 pip-venv onefile build):
 

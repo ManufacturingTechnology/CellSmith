@@ -47,19 +47,31 @@ runs:
       # ⭐ build.bat only WARNS and continues when ISCC is not found, so a missing
       # installer would otherwise pass silently. This assertion is why the check
       # lives in the shared action: the PR gate must catch it, not just release.
-      shell: bash -el {0}
+      #
+      # `shell: bash` (= bash --noprofile --norc -eo pipefail {0}), not
+      # `bash -el {0}`: globbing and stat'ing files needs no conda env, and the
+      # login-shell variant of this step failed on Linux having printed nothing
+      # but ok lines. See the sibling build-linux action for the full note.
+      shell: bash
       run: |
-        set -uo pipefail
         rc=0
-        if compgen -G "dist/CellSmith-v*-win64.zip" > /dev/null; then
-          echo "  ok    $(ls -lh dist/CellSmith-v*-win64.zip | awk '{print $NF, "("$5")"}')"
-        else
-          echo "::error::no zip was produced — see the build log"; rc=1
-        fi
-        if compgen -G "dist/CellSmith-v*-setup.exe" > /dev/null; then
-          echo "  ok    $(ls -lh dist/CellSmith-v*-setup.exe | awk '{print $NF, "("$5")"}')"
-        else
-          echo "::error::No installer was produced. build.bat skips Inno Setup with only a warning when ISCC is not found — check the build log for 'Inno Setup 6 not found'."
-          rc=1
-        fi
-        exit $rc
+        say_missing() { echo "::error::$1"; rc=1; }
+        # Unquoted glob; unmatched patterns stay literal, so -e fails. Do NOT
+        # write `[ -e "$f" ] && hit=$f` — under `set -e` the no-match path would
+        # abort the script instead of reporting.
+        for spec in "zip:dist/CellSmith-v*-win64.zip" "installer:dist/CellSmith-v*-setup.exe"; do
+          kind="${spec%%:*}"; pat="${spec#*:}"
+          hit=""
+          for f in $pat; do
+            if [ -e "$f" ]; then hit="$f"; fi
+          done
+          if [ -n "$hit" ]; then
+            echo "  ok    $hit ($(du -h "$hit" | cut -f1))"
+          elif [ "$kind" = installer ]; then
+            say_missing "No installer was produced. build.bat skips Inno Setup with only a warning when ISCC is not found — check the build log for 'Inno Setup 6 not found'."
+          else
+            say_missing "no zip was produced — see the build log"
+          fi
+        done
+        echo "verdict: rc=$rc"
+        exit "$rc"

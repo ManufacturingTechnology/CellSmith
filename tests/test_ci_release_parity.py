@@ -121,8 +121,21 @@ def test_the_composite_action_actually_builds_and_verifies(action: str) -> None:
     assert "verify-payload.sh" in body, f"{path.name} never verifies the payload"
     assert ("make build" in body) or ("build.bat" in body), \
         f"{path.name} never runs the packaging build"
-    assert "compgen -G" in body, \
-        f"{path.name} never asserts the artifacts were produced"
+    # Assert on BEHAVIOUR, not on the globbing primitive: an earlier version of
+    # this test pinned `compgen -G`, so it kept passing on a file where the only
+    # surviving `compgen` was inside a comment. The step must exist, must be able
+    # to fail loudly, and must state the verdict it reached — that last part is
+    # what distinguishes "the script decided to fail" from "the shell wrapper
+    # failed", which cost a CI round-trip to tell apart.
+    asserts = [s for s in doc["runs"]["steps"]
+               if (s.get("name") or "").startswith("Assert")]
+    assert asserts, f"{path.name} never asserts the artifacts were produced"
+    for step in asserts:
+        run = step.get("run", "")
+        assert "::error::" in run, \
+            f"{path.name}: {_label(step)!r} cannot report a missing artifact"
+        assert "verdict:" in run, \
+            f"{path.name}: {_label(step)!r} does not print the rc it decided on"
     # Composite steps do NOT inherit a job's `defaults.run.shell`.
     for step in doc["runs"]["steps"]:
         assert "uses" in step or "shell" in step, \
