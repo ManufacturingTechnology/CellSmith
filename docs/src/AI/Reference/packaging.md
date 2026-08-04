@@ -14,7 +14,32 @@ version-driven trigger, rulesets) is documented for humans in the repo-root
 |---|---|---|
 | Trigger | `pull_request` → `main`, `dev/*`, `release/*` | push to `release/*` touching `src/__version__.py`; plus `workflow_dispatch` |
 | Jobs | `version-check`, `test-linux`, `test-windows`, `build-linux`, `build-windows` | `version`, `build-linux`, `build-windows`, `release` |
-| Packaging | **none** — PyInstaller only, then `verify-payload.sh`. Skipping the zip/installer/`.deb` keeps the gate ~15 min shorter. | full: zip + installer (Windows), tar.gz + `.deb` (Linux) |
+| Packaging | **identical to release** — both `build-*` jobs are the same composite action (see below) | same composite action, **plus** collect + upload |
+
+### ⭐ The PR gate runs the RELEASE build — one composite action per OS (ADR-0009)
+
+`.github/actions/build-{linux,windows}/action.yml` hold the entire build — free
+space, system libs, conda env, `make build` / `build.bat ci`, `verify-payload.sh`,
+and an assertion that the artifacts exist. **Both workflows `uses:` them**; only
+publishing (collect, upload, tag) is release-specific.
+
+This reverses an earlier trade — the gate used to run PyInstaller only, "~15 min
+shorter" — because the two costliest defects of the 2026-08-04 release push were
+*both* in the half the gate skipped: `make_deb.sh`'s SIGPIPE (only reproducible on a
+real payload) and a version guard that had never worked (in two inlined copies).
+**A step the gate does not run is a step nobody has tested**, and duplicated steps
+drift. `tests/test_ci_release_parity.py` enforces it: same composite action in both
+workflows, no inline `make build` / `build.bat` / `PyInstaller` / `verify-payload.sh`
+in either, and nothing in release's build job that the gate does not also run.
+
+Also early-surfacing, same push: `version-check` now validates that `__version__`
+parses and is semver on **every** PR (the branch-match half still only applies to
+`release/X.Y` bases) — a malformed version breaks `make build`, the `.deb` version
+and the tag, none of which is release-branch-specific.
+
+⚠️ **Cost:** the gate is ~15 min longer per PR. If that becomes intolerable, the
+escape hatch is a `paths`-filter or a label-gated job — **not** a cheaper build,
+which is the thing that failed.
 
 **CellSmith-specific adaptations** (none of these apply to MTConnectExplorer, which is a
 pip-venv onefile build):
@@ -285,10 +310,29 @@ worker subprocesses; onefile would re-extract the ~1.4 GB payload per launch.
   - **Templating uses Python, not `sed`.** The `Depends` list contains `|` and the
     maintainer contains `<`/`>`/`@`, so every plausible sed delimiter appears in some
     value — the first version died with ``unknown option to `s'``.
-  - The script ends with **9 self-checks** (archive readable, launcher, symlink, desktop
-    entry, icon, copyright, notices, Qt plugins present, no bare `-` in the version) and
-    runs `lintian` informationally when available. Verified end-to-end in a WSL Debian
-    sandbox against a synthetic payload.
+  - The script ends with **10 self-checks** (archive readable, launcher, symlink, desktop
+    entry, icon, copyright, notices, Qt plugins present, **no GPL readline**, no bare `-`
+    in the version) and runs `lintian` informationally when available. The readline check
+    is there because the payload verifier only ever sees `dist/CellSmith` — the `.deb` is
+    a separate distribution and needs its own assertion.
+  - ⛔ **TWO TRAPS in that self-check block; both fired only on a REAL payload.**
+    1. **SIGPIPE.** The checks were `printf '%s\n' "$contents" | grep -q PAT`. `grep -q`
+       exits at the first match and closes the pipe; the real listing is ~200 kB, well
+       past the 64 kB pipe buffer, so `printf` was still writing and died —
+       `printf: write error: Broken pipe`, and `make build` failed *after* successfully
+       building the `.deb`. ⭐ Note the shape: **it fires only when the check SUCCEEDS**
+       (an early match is what closes the pipe) and only when the listing is big enough
+       to block — which is exactly why it passed against a small synthetic payload in the
+       WSL sandbox and failed on the 2111-file build. Fix: `dpkg-deb --contents` to a
+       file once, then `grep -q` the FILE. No pipe, no SIGPIPE.
+    2. **`set -e` made `check()` unreachable.** With `-e`, a bare `cmd; check $?` aborts
+       the moment `cmd` fails, so `fail`, the `FAIL` lines and the "self-checks failed"
+       summary were all dead code — any failing check surfaced as a bare
+       `make: *** Error 1` with no indication of *which*. Every check is now written so
+       its own failure is TESTED (`if/then/else` via the `has()` helper). Re-verified in
+       WSL against a synthetic payload padded to 2200 files: the old form exits **141**
+       (SIGPIPE) before printing anything; the new form prints `FAIL <name>`, keeps
+       running the remaining checks, and exits 1 with the summary.
 - ⭐ **Payload verifier** (`.github/scripts/verify-payload.sh <dir> <launcher>`), shared by
   both workflows so the PR gate and the shipped artifact are held to the same standard.
   Asserts the payload is *usable*, not merely present: Qt plugins collected, a Qt
@@ -314,7 +358,27 @@ worker subprocesses; onefile would re-extract the ~1.4 GB payload per launch.
         | Run | Hits | Route |
         |---|---|---|
         | 1 | 3 — incl. `readline.cpython-312-…so` | **`a.binaries`.** Binary dependency analysis collected the `readline` **extension module**, which is what drags `libreadline` in via **`DT_NEEDED`**. (On a stock Debian layout it is the *only* consumer of `libreadline` — probed with `readelf -d` over `/usr/lib/x86_64-linux-gnu` + `lib-dynload`.) |
-        | 2 | 4 — `lib{readline,history}.so{,.8}`, **zero** reverse deps | **`a.datas`, and it is PyInstaller's OWN numpy hook.** `PyInstaller/hooks/hook-numpy.py` does `if numpy_installer == 'conda': datas += conda_support.collect_dynamic_libs("numpy", dependencies=True)`. `dependencies=True` walks numpy's conda dependency **graph** (numpy → python → readline) and `conda.collect_dynamic_libs` **globs `*.so`/`*.so.*` out of the env's shared `lib/`**, symlinks included (`resolved_file.is_file()` follows them) — hence all four files, and hence nothing NEEDs them. Swept, not linked. |
+        | 2 | 4 — `lib{readline,history}.so{,.8}`, **zero** reverse deps | **`a.datas`.** Nothing in the payload NEEDs them, so they were *swept* out of the conda env's shared `lib/`, not linked. Origin: PyInstaller's OWN numpy hook — `PyInstaller/hooks/hook-numpy.py` does `if numpy_installer == 'conda': datas += conda_support.collect_dynamic_libs("numpy", dependencies=True)`; `dependencies=True` walks numpy's conda dependency **graph** (numpy → python → readline) and `conda.collect_dynamic_libs` globs `*.so`/`*.so.*` out of `lib_dir`. |
+
+        ⭐ **What run 3 corrected.** With the filter printing every entry it drops, the
+        build log showed the two lists split the files by KIND, not by origin:
+
+        ```text
+        dropped from a.binaries: ('libhistory.so.8.3',  '…/envs/CellSmithEnv/lib/libhistory.so.8.3',  'BINARY')
+        dropped from a.binaries: ('libreadline.so.8.3', '…/envs/CellSmithEnv/lib/libreadline.so.8.3', 'BINARY')
+        dropped from a.datas:    ('libreadline.so.8',   'libreadline.so.8.3',  'SYMLINK')
+        dropped from a.datas:    ('libhistory.so.8',    'libhistory.so.8.3',   'SYMLINK')
+        dropped from a.datas:    ('libhistory.so',      'libhistory.so.8.3',   'SYMLINK')
+        dropped from a.datas:    ('libreadline.so',     'libreadline.so.8.3',  'SYMLINK')
+        ```
+
+        The **real files** end up in `a.binaries` as `BINARY` — the hook files them under
+        `datas`, then PyInstaller's *"Performing binary vs. data reclassification"* pass
+        (visible in the same log) moves anything that is actually a shared library into
+        `binaries`. The **symlinks** stay in `a.datas` with typecode `SYMLINK`, where
+        `src` is the link target rather than a path. So filtering both lists was
+        necessary for a reason neither run alone revealed, and dest-basename matching is
+        the right predicate because it is the one field both kinds share.
 
       So the spec filters **both lists** (dest basename starting `readline` /
       `libreadline` / `libhistory`), printing the full `(dest, src, typecode)` of every

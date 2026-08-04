@@ -103,3 +103,35 @@ Architecture Decision Records for deliberate, non-obvious calls — especially o
   cleaner home.
 - **Confidence:** High — this was pure data loss with no upside. **Status:** Accepted.
   See `restructure-and-transform-source.md`, status `CS-131`.
+
+---
+
+## ADR-0009 — The PR gate builds the full release artifacts, not a cheap approximation
+- **Context:** `ci.yml`'s `build-*` jobs ran PyInstaller only — no tar.gz, no `.deb`, no
+  zip, no Inno installer — deliberately, to keep the gate ~15 min shorter. The packaging
+  half therefore ran for the first time during a release. On the 2026-08-04 release push
+  the two costliest defects were both in that unrun half: `make_deb.sh` died with
+  `printf: write error: Broken pipe` the first time it saw a real (2111-file) payload, and
+  the release version guard had never worked at all — an unanchored parse of
+  `src/__version__.py` that matched the module docstring, inlined identically in *both*
+  workflows.
+- **Decision:** the PR gate runs the **same build as the release**, defined **once** in
+  `.github/actions/build-{linux,windows}/action.yml` (composite actions) and `uses:`d by
+  both workflows. Release-specific work — collecting artifacts, uploading, tagging,
+  creating the dev branch — stays in `release.yml`. Artifact-existence assertions live in
+  the shared action, not the release-only collect step, so "no installer was produced"
+  fails on the PR. `tests/test_ci_release_parity.py` enforces all of it.
+  Additionally: `version-check` validates that `__version__` parses and is semver on
+  **every** PR, not only PRs into `release/X.Y`.
+- **Alternatives:** (a) keep the cheap gate and accept release-day discovery — rejected,
+  it is the most expensive place to find a packaging bug and it blocks a release;
+  (b) duplicate the release steps into `ci.yml` as YAML — rejected, duplicated steps are
+  what produced two identically-broken version parses; (c) run the full build only on PRs
+  into `release/*` — rejected, that still lets a defect sit on `main` and it is the
+  feature→main PR that introduces it.
+- **Revisit if:** gate wall-clock becomes the bottleneck. The escape hatch is a
+  `paths`-filter or a label-gated job (skip the build when a PR touches only docs) —
+  **not** a cheaper build, which is precisely the thing that failed.
+- **Confidence:** High — the trade was tested empirically and lost twice in one week.
+  **Status:** Accepted. See `packaging.md` § *The PR gate runs the RELEASE build*,
+  status `CS-160`.

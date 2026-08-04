@@ -195,18 +195,51 @@ echo "Built $DEB ($(du -h "$DEB" | cut -f1))"
 fail=0
 check() { if [ "$1" = 0 ]; then echo "  ok   $2"; else echo "  FAIL $2" >&2; fail=1; fi; }
 
-dpkg-deb --info "$DEB" >/dev/null 2>&1; check $? "the archive is a readable .deb"
-contents="$(dpkg-deb --contents "$DEB")"
-printf '%s\n' "$contents" | grep -q ' ./opt/cellsmith/CellSmith$'; check $? "payload launcher present"
-printf '%s\n' "$contents" | grep -q './usr/bin/cellsmith -> /opt/cellsmith/CellSmith'; check $? "/usr/bin symlink present"
-printf '%s\n' "$contents" | grep -q './usr/share/applications/cellsmith.desktop$'; check $? "desktop entry present"
-printf '%s\n' "$contents" | grep -q 'cellsmith.png$'; check $? "icon present"
-printf '%s\n' "$contents" | grep -q './usr/share/doc/cellsmith/copyright$'; check $? "copyright present"
-printf '%s\n' "$contents" | grep -q 'THIRD-PARTY-NOTICES.md$'; check $? "third-party notices present"
+# ⛔ TWO TRAPS HERE, BOTH HIT ON THE FIRST REAL (non-synthetic) PAYLOAD. Do not
+# rewrite these checks as `cmd; check $?` over a pipe.
+#
+# 1. SIGPIPE. This block used to be `printf '%s\n' "$contents" | grep -q PAT`.
+#    `grep -q` exits at the FIRST match, closing the pipe; the real payload's
+#    file list is ~200 kB, well past the 64 kB pipe buffer, so printf was still
+#    writing and died with `printf: write error: Broken pipe`. ⭐ Note the shape
+#    of that bug: it fires only when the check SUCCEEDS (an early match is what
+#    closes the pipe) and only when the listing is big enough to block — which is
+#    exactly why it passed against a small synthetic payload in the WSL sandbox
+#    and failed on the 2111-file build. Grep a FILE; no pipe, no SIGPIPE.
+#
+# 2. `set -e` vs `check $?`. With `-e`, a bare `cmd; check $?` aborts the script
+#    the moment cmd fails, so check() never runs: `fail`, the FAIL lines, and the
+#    "self-checks failed" summary below were all unreachable, and any failure
+#    surfaced as a bare `make: *** Error 1`. Every check must therefore be
+#    written so its own failure is TESTED (if/then/else), never bare.
+CONTENTS="$STAGE/.deb-contents.txt"   # inside STAGE, so the EXIT trap cleans it
+dpkg-deb --contents "$DEB" > "$CONTENTS"
+
+if dpkg-deb --info "$DEB" >/dev/null 2>&1
+    then check 0 "the archive is a readable .deb"
+    else check 1 "the archive is a readable .deb"; fi
+
+has() {  # has <pattern> <label> -- never returns non-zero; see trap 2 above
+    if grep -q -- "$1" "$CONTENTS"; then check 0 "$2"; else check 1 "$2"; fi
+}
+
+has ' ./opt/cellsmith/CellSmith$'                      "payload launcher present"
+has './usr/bin/cellsmith -> /opt/cellsmith/CellSmith'  "/usr/bin symlink present"
+has './usr/share/applications/cellsmith.desktop$'      "desktop entry present"
+has 'cellsmith.png$'                                   "icon present"
+has './usr/share/doc/cellsmith/copyright$'             "copyright present"
+has 'THIRD-PARTY-NOTICES.md$'                          "third-party notices present"
 # Qt plugins: the silent-failure fingerprint from packaging.md -- Qt's lib/ present
 # but plugins/ absent. Linux nests them under PySide6/Qt/, Windows directly under
 # PySide6/; match loosely so a PySide6 layout change fails for the right reason.
-printf '%s\n' "$contents" | grep -q '_internal/PySide6/.*plugins/'; check $? "Qt plugins collected (not the empty-plugins failure)"
+has '_internal/PySide6/.*plugins/' "Qt plugins collected (not the empty-plugins failure)"
+# The GPL readline exclusion, asserted on the SHIPPED artifact too: the payload
+# verifier only ever sees dist/CellSmith, and the .deb is a separate distribution.
+# Anchored to the FILENAME, mirroring verify-payload.sh's patterns -- a loose
+# match on "history" would hit unrelated package files.
+if grep -qE '/(readline[^/]*\.(so|pyd)[^/]*|lib(readline|history)[^/]*)$' "$CONTENTS"
+    then check 1 "no GPL readline in the .deb"
+    else check 0 "no GPL readline in the .deb"; fi
 case "$DEBVER" in *-*) check 1 "debian version has no bare '-' (prerelease must use '~')";; *) check 0 "debian version uses '~' for any prerelease";; esac
 
 if command -v lintian >/dev/null 2>&1; then
