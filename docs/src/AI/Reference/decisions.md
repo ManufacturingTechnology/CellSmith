@@ -103,3 +103,80 @@ Architecture Decision Records for deliberate, non-obvious calls — especially o
   cleaner home.
 - **Confidence:** High — this was pure data loss with no upside. **Status:** Accepted.
   See `restructure-and-transform-source.md`, status `CS-131`.
+
+---
+
+## ADR-0009 — The PR gate builds the full release artifacts, not a cheap approximation
+- **Context:** `ci.yml`'s `build-*` jobs ran PyInstaller only — no tar.gz, no `.deb`, no
+  zip, no Inno installer — deliberately, to keep the gate ~15 min shorter. The packaging
+  half therefore ran for the first time during a release. On the 2026-08-04 release push
+  the two costliest defects were both in that unrun half: `make_deb.sh` died with
+  `printf: write error: Broken pipe` the first time it saw a real (2111-file) payload, and
+  the release version guard had never worked at all — an unanchored parse of
+  `src/__version__.py` that matched the module docstring, inlined identically in *both*
+  workflows.
+- **Decision:** the PR gate runs the **same build as the release**, defined **once** in
+  `.github/actions/build-{linux,windows}/action.yml` (composite actions) and `uses:`d by
+  both workflows. Release-specific work — collecting artifacts, uploading, tagging,
+  creating the dev branch — stays in `release.yml`. Artifact-existence assertions live in
+  the shared action, not the release-only collect step, so "no installer was produced"
+  fails on the PR. `tests/test_ci_release_parity.py` enforces all of it.
+  Additionally: `version-check` validates that `__version__` parses and is semver on
+  **every** PR, not only PRs into `release/X.Y`.
+- **Alternatives:** (a) keep the cheap gate and accept release-day discovery — rejected,
+  it is the most expensive place to find a packaging bug and it blocks a release;
+  (b) duplicate the release steps into `ci.yml` as YAML — rejected, duplicated steps are
+  what produced two identically-broken version parses; (c) run the full build only on PRs
+  into `release/*` — rejected, that still lets a defect sit on `main` and it is the
+  feature→main PR that introduces it.
+- **Revisit if:** gate wall-clock becomes the bottleneck. The escape hatch is a
+  `paths`-filter or a label-gated job (skip the build when a PR touches only docs) —
+  **not** a cheaper build, which is precisely the thing that failed.
+- **Confidence:** High — the trade was tested empirically and lost twice in one week.
+  **Status:** Accepted. See `packaging.md` § *The PR gate runs the RELEASE build*,
+  status `CS-160`.
+
+## ADR-0010 — Simplify Bodies merges TRIANGLES, and a stale mark is fatal EVERYWHERE
+- **Context:** Isaac Sim degrades badly when a robot/CNC link is hundreds or
+  thousands of separate `UsdGeom.Mesh` prims — the cost is per-prim/per-draw-call,
+  not per triangle. "Mark Simplify Bodies" (CS-162) exports a marked subtree as one
+  mesh. Two forks had to be settled.
+- **Decision (a) — triangle concatenation, NOT an OCC boolean.** `_baked_tris`
+  already puts every component in the same export space, so `_author_merged_mesh`
+  is vertex-index offsetting + `np.concatenate`. Triangle count and per-triangle
+  colors are unchanged; no seam is invented.
+  - **Alternatives:** `BRepAlgoAPI_Fuse` on the solids — rejected: minutes-to-hours
+    on thousands of solids, fails often, and destroys the per-face color indices
+    `_per_triangle_rgb` depends on. It also solves a problem nobody has (fewer
+    *surfaces*) instead of the one measured (fewer *prims*). Note this matches the
+    existing precedent: Edit-Bodies "Merge" is already deliberately compound
+    grouping, not a boolean (`geometry_edits_build.merge_bodies`).
+  - Corollary: because the writer has NO UsdShade materials and NO GeomSubsets,
+    merging is **color-lossless** — concatenated `uniform` displayColor says
+    exactly what N separate prims said. Verified on real geometry: `testB2` Static,
+    755 bodies → 1 prim, 3.78 M triangles and 924 k per-triangle colors identical.
+- **Decision (b) — a mark whose subtree contains a live frame or joint body is
+  REFUSED, and a STALE mark is FATAL on every export path** (subtree USD, composed
+  USD, OBJ). Checked against **STRICT descendants only** — the marked node's own
+  frame is fine and is preserved, which is what makes "mark each link" (the link IS
+  the joint's Body1) the workflow.
+  - **This deliberately diverges from ADR-0007's** "asset generation stays TOLERANT,
+    warn-don't-block" stance for dropped split recipes. Justified because the
+    failure modes are opposites: a dropped recipe **loses authored data**, so
+    blocking a build over it costs more than it saves; a silently-unmerged asset
+    **loses nothing** but silently reproduces the exact performance problem the
+    feature exists to fix, and the user would not notice until Isaac is slow again.
+    The user chose strict-everywhere explicitly (2026-08-06).
+  - The strictness is made livable by catching it EARLY, not by softening it:
+    `_set_simplify_nodes` refuses at click, and `_confirm_frame_breaks_simplify`
+    warns when Create Joint / ReOrigin would invalidate an existing mark.
+  - **Alternatives:** auto-split the merge at each frame boundary (fewest clicks,
+    but a mark then silently means something different from what was clicked);
+    tolerant + `CELLSMITH-WARN` (rejected per above).
+- **Revisit if:** (a) Isaac turns out to be bottlenecked by `uniform` displayColor
+  rather than prim count — then group by color into one mesh per material instead;
+  (b) strict export refusals become a nuisance in practice, i.e. marks are
+  routinely invalidated by later rigging. Then reconsider tolerant-with-warning.
+- **Confidence:** Medium-high — (a) is measured and firm; (b) is a user preference
+  chosen with the tradeoff stated. **Status:** Accepted. See `export.md` §
+  *Simplify Bodies*, `kinematic-joints.md`, status `CS-162`.

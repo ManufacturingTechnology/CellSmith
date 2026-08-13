@@ -124,7 +124,7 @@ def main(argv: list[str]) -> int:
     need_meshes = fmt in ("usd", "obj")
 
     def load_one(model_id: str, variant: str, what: str):
-        """(assembly, cfg, suppressed_excluded_cids, origin_frame_cids)."""
+        """(assembly, cfg, excluded_cids, frame_cids, joints, simplify_cids)."""
         asm = _load_main(model_id, variant)
         cfg, _ = store.activate(model_id, asm)
         bake_effective_appearance(cfg, asm)
@@ -155,8 +155,9 @@ def main(argv: list[str]) -> int:
         # bake — reconstruct their paths here so body/link frames export live).
         from ..model.geometry_edits import body_origin_paths, load_split_map
 
-        from .frame_paths import (
-            inherited_folder_frame_paths, inherited_frame_paths)
+        from ..model.live_frames import (
+            inherited_folder_frame_paths, inherited_frame_paths,
+            joint_body_cids)
 
         fpaths = set(store.get_origin_map(model_id) or {})
         fpaths |= body_origin_paths(load_split_map(store.get_split_map(model_id)))
@@ -209,8 +210,21 @@ def main(argv: list[str]) -> int:
                 joint_type=jd.joint_type, axis=jd.axis, flip=jd.flip,
                 stiffness=jd.stiffness, damping=jd.damping,
                 limit_enabled=jd.limit_enabled, lower=jd.lower, upper=jd.upper))
+        # "Simplify Bodies" marks — validated HERE, before anything is written, so
+        # a stale mark names its model and fails the build cleanly rather than
+        # part-way through authoring. (The USD writer re-checks as a backstop; the
+        # OBJ writer cannot check at all — it authors no frames or joints.)
+        simplify = cfg.simplify_ids() - excluded
+        if simplify and need_meshes:
+            from ..model.simplify_marks import require_valid_marks
+
+            try:
+                require_valid_marks(asm, simplify, frames,
+                                    joint_body_cids(joints))
+            except RuntimeError as exc:
+                raise RuntimeError(f"{what}: {exc}") from exc
         print(f"loaded {what} ({len(asm)} components)", flush=True)
-        return asm, cfg, excluded, frames, joints
+        return asm, cfg, excluded, frames, joints, simplify
 
     # (meta, assembly, excluded, frames, [(occ_display_name, placement, occ_path)])
     # placement = W_occ · R_canonical⁻¹, compensating for the canonical
@@ -227,7 +241,7 @@ def main(argv: list[str]) -> int:
         variant = cache.ASSET_VARIANT_PREFIX + e["slug"]
         if variant not in cache.list_asset_variants(step_path):
             raise RuntimeError(f"asset variant missing on disk: {variant}")
-        asm, cfg, excluded, frames, joints = load_one(
+        asm, cfg, excluded, frames, joints, simplify = load_one(
             asset_model(e["name"]), variant, f"asset '{e['name']}'")
         occ_paths = e.get("occurrence_paths") or ()
         # When the asset ROOT carries a Root-level custom origin, generation left
@@ -249,12 +263,12 @@ def main(argv: list[str]) -> int:
             placement = np.asarray(mat4_mul(occurrence_pose(p), r_inv),
                                    dtype=float)
             occs.append((name, placement, p))
-        models.append((e, asm, excluded, frames, joints, occs))
+        models.append((e, asm, excluded, frames, joints, simplify, occs))
     static = None
     if static_ok:
-        asm, cfg, excluded, frames, joints = load_one(
+        asm, cfg, excluded, frames, joints, simplify = load_one(
             MODEL_STATIC, cache.STATIC_VARIANT, "static")
-        static = (asm, excluded, frames, joints)
+        static = (asm, excluded, frames, joints, simplify)
 
     scene_name = os.path.splitext(os.path.basename(step_path))[0]
 
@@ -289,7 +303,7 @@ def _compose_usd(models, static, out_path: str, scene_name: str,
     asset_dir = os.path.join(os.path.dirname(out_path) or ".", asset_dir_name)
     os.makedirs(asset_dir, exist_ok=True)
 
-    def _write_layered(asm, slug, excluded, frames, joints):
+    def _write_layered(asm, slug, excluded, frames, joints, simplify):
         """Write ``{slug}_base.usd`` (always) + ensure ``{slug}.usda`` (once).
 
         The base holds the full authored export and is OVERWRITTEN every time;
@@ -301,7 +315,7 @@ def _compose_usd(models, static, out_path: str, scene_name: str,
         n = write_model_usd(
             asm, os.path.join(asset_dir, base_name),
             suppressed=excluded, scale=scale, origin_frame_cids=frames,
-            joints=joints)
+            joints=joints, simplify_cids=simplify)
         write_override_wrapper(
             os.path.join(asset_dir, base_name),
             os.path.join(asset_dir, wrapper_name))
@@ -309,14 +323,14 @@ def _compose_usd(models, static, out_path: str, scene_name: str,
 
     entries = []
     n_meshes = 0
-    for e, asm, excluded, frames, joints, occs in models:
-        n, rel = _write_layered(asm, e['slug'], excluded, frames, joints)
+    for e, asm, excluded, frames, joints, simplify, occs in models:
+        n, rel = _write_layered(asm, e['slug'], excluded, frames, joints, simplify)
         n_meshes += n
         for name, w, p in occs:
             entries.append((name, rel, _meter_place(w, scale), p))
     if static is not None:
-        asm, excluded, frames, joints = static
-        n, rel = _write_layered(asm, "static", excluded, frames, joints)
+        asm, excluded, frames, joints, simplify = static
+        n, rel = _write_layered(asm, "static", excluded, frames, joints, simplify)
         n_meshes += n
         entries.append(("Static", rel, None, "static"))
     # The SCENE gets the same base/override split as each asset: the composed
@@ -352,16 +366,16 @@ def _compose_obj(models, static, out_path: str, scene_name: str,
 
     s4 = np.asarray(export_transform("+Z", 0, scale, None), dtype=float)
     items = []
-    for e, asm, excluded, frames, joints, occs in models:  # OBJ ignores joints
+    for e, asm, excluded, frames, joints, simplify, occs in models:  # OBJ ignores joints
         included = {c.component_id for c in asm.components} - excluded
         for name, w, p in occs:
             place = np.asarray(mat4_mul(s4, np.asarray(w, dtype=float)),
                                dtype=float)
-            items.append((asm, f"{name}/", place, included))
+            items.append((asm, f"{name}/", place, included, simplify))
     if static is not None:
-        asm, excluded, frames, joints = static
+        asm, excluded, frames, joints, simplify = static
         included = {c.component_id for c in asm.components} - excluded
-        items.append((asm, "Static/", s4, included))
+        items.append((asm, "Static/", s4, included, simplify))
     return write_composed_obj(items, out_path, scene_name=scene_name)
 
 
@@ -371,10 +385,12 @@ def _compose_step(models, static, out_path: str, scene_name: str) -> int:
     from ..io_step.compose_step import export_composed_step
 
     entries = []
-    for e, asm, excluded, frames, joints, occs in models:  # STEP ignores joints
+    # STEP ignores joints AND Simplify Bodies marks (the mark is a tessellation-
+    # level merge; a STEP re-export writes exact B-rep, which has no such concept).
+    for e, asm, excluded, frames, joints, simplify, occs in models:
         entries.append((asm, [(name, w) for name, w, p in occs], excluded))
     if static is not None:
-        asm, excluded, frames, joints = static
+        asm, excluded, frames, joints, simplify = static
         entries.append((asm, [("Static", np.eye(4))], excluded))
     return export_composed_step(entries, out_path, scene_name=scene_name)
 

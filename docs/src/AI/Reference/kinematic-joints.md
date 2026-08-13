@@ -147,3 +147,23 @@ its authored USD prim name.
   conversion, Apply→config, Edit reload, Clear, Remove (32). GL rendering + picking
   + the live pane are USER live-test (no GPU in this dev env).
 
+## Joints vs "Simplify Bodies" marks
+
+A joint binds `UsdPhysics` rels to an exact prim path, so a joint body can never
+be **inside** a Simplify-Bodies mark (which folds a whole subtree into one prim).
+Two guards, both off `model/live_frames.joint_body_cids`:
+
+- **Marking**, `main_window._set_simplify_nodes` → `simplify_marks.validate_marks`:
+  refused when a STRICT descendant is a joint body (reason `joint`).
+- **Jointing**, `main_window._start_joint` → `_confirm_frame_breaks_simplify`:
+  creating a joint on a node that sits inside an existing mark warns and offers to
+  clear that mark (Cancel is the default). Worth the interruption because export
+  is **strictly fatal** on a stale mark (ADR-0010) — better a dialog now than a
+  failed build later.
+
+⭐ **A node that IS the joint's Body1 CAN be marked** — that is the primary
+workflow ("merge this link's 400 bodies"). Only STRICT descendants block, and the
+marked node keeps its own live `xformOp`, so the merged prim IS the joint pivot.
+Probe-verified on `testB2` `asset:Butler`: all 7 joint prims and their Body0/Body1
+targets are unchanged with a link marked (`scratchpad/simplify_real_probe.py`).
+

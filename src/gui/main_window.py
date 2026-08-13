@@ -376,6 +376,9 @@ class MainWindow(QMainWindow):
         self._hidden_nodes: set[str] = set()
         #: Nodes marked as Assets (blue marker; source model only).
         self._asset_nodes: set[str] = set()
+        #: Nodes marked "Simplify Bodies" — their subtree exports as ONE merged
+        #: mesh (cyan marker; GENERATED models only, the mirror of _asset_nodes).
+        self._simplify_nodes: set[str] = set()
         #: Durable scene config (global + per-node) of the ACTIVE model.
         self._config: SceneConfig = SceneConfig()
         #: The one config file's store (source + static + per-asset sections).
@@ -1110,12 +1113,19 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f"Asset marks expanded to full prototype groups "
                     f"(+{len(added)} occurrence(s)).")
+        # Simplify-Bodies marks are the MIRROR of asset marks: meaningful only in
+        # GENERATED models (an asset/Static is what gets rigged and loaded into
+        # Isaac; Main is never exported as a rig).
+        self._simplify_nodes = (self._config.simplify_ids() & valid
+                                if model != MODEL_SOURCE else set())
         for cid in self._suppressed:
             self._tree.set_suppressed(cid, True)
         for cid in self._hidden_nodes:
             self._tree.set_hidden(cid, True)
         for cid in self._asset_nodes:
             self._tree.set_asset(cid, True)
+        for cid in self._simplify_nodes:
+            self._tree.set_simplify(cid, True)
         for cid, node in self._config.nodes.items():
             if node.color_override is not None and cid in valid:
                 self._tree.set_color_override(cid, True)
@@ -1540,6 +1550,8 @@ class MainWindow(QMainWindow):
         all_hidden = all(c in self._hidden_nodes for c in targets)
         all_suppressed = all(c in self._suppressed for c in targets)
         all_assets = all(c in self._asset_nodes for c in targets)
+        all_simplify = all(c in self._simplify_nodes for c in targets)
+        any_simplify = any(c in self._simplify_nodes for c in targets)
         any_override = any(self._has_color_override(c) for c in targets)
 
         menu = QMenu(self)
@@ -1550,6 +1562,19 @@ class MainWindow(QMainWindow):
         act_asset = None
         if self._active_model == MODEL_SOURCE:
             act_asset = menu.addAction("Unmark as Asset" if all_assets else "Mark as Asset")
+        # Simplify Bodies is the MIRROR gate — GENERATED models only (an asset or
+        # Static is what Isaac loads; Main is never exported as a rig). Two
+        # explicit entries rather than one toggling label, so a mixed
+        # multi-selection is unambiguous.
+        act_simplify = act_simplify_clear = None
+        if self._active_model != MODEL_SOURCE:
+            act_simplify = menu.addAction("Mark Simplify Bodies")
+            act_simplify.setEnabled(not all_simplify)
+            act_simplify.setToolTip(
+                "Export this node's whole subtree as ONE merged mesh instead of "
+                "one per body — far fewer prims for Isaac Sim.")
+            act_simplify_clear = menu.addAction("Clear Mark Simplify Bodies")
+            act_simplify_clear.setEnabled(any_simplify)
         menu.addSeparator()
         act_color = menu.addAction("Override Body Color…")
         act_clear_color = menu.addAction("Clear Body Color Override")
@@ -1618,6 +1643,10 @@ class MainWindow(QMainWindow):
                 self._set_suppressed_nodes(targets, not all_suppressed)
         elif act_asset is not None and chosen == act_asset:
             self._set_asset_nodes(targets, not all_assets)
+        elif act_simplify is not None and chosen == act_simplify:
+            self._set_simplify_nodes(targets, True)
+        elif act_simplify_clear is not None and chosen == act_simplify_clear:
+            self._set_simplify_nodes(targets, False)
         elif chosen == act_color:
             if self._confirm_edit_clears_assets():
                 self._override_color(targets)
@@ -1806,6 +1835,116 @@ class MainWindow(QMainWindow):
             f"{'Marked' if is_asset else 'Unmarked'} {self._targets_label(cids)} as "
             f"Asset{extra}. {n_groups} asset(s) marked — right-click “Assets” in "
             f"the Model Tree to generate.")
+
+    # --- Simplify Bodies (generated models only; export-time mesh merge) ---
+
+    def _live_frames_and_joints(self):
+        """``(frame_cids, joints)`` for the ACTIVE model, exactly as the exporters
+        compute them — the shared derivation in :mod:`..model.live_frames`. Used
+        only to validate Simplify-Bodies marks; returns empty sets if anything is
+        unavailable (the export re-checks strictly either way)."""
+        if self._assembly is None or self._store is None or not self._source_path:
+            return set(), []
+        from ..model.live_frames import live_frames_and_joints
+
+        try:
+            return live_frames_and_joints(
+                self._store, self._active_model, self._source_path, self._assembly)
+        except Exception:  # noqa: BLE001 - a missing stamp/map must not block the UI
+            log.exception("live-frame lookup failed; Simplify validation skipped")
+            return set(), []
+
+    def _set_simplify_nodes(self, cids: list, on: bool) -> None:
+        """Mark/clear "Simplify Bodies" on nodes (cyan bars; GENERATED models only).
+
+        A marked node's whole subtree exports as ONE merged mesh — the fix for
+        Isaac Sim's per-prim cost when a link is hundreds of separate bodies. The
+        merge is a triangle concatenation at export; nothing about the bake, the
+        viewport or the STEP path changes, so this needs no asset invalidation.
+
+        Refused when a STRICT descendant owns a live frame or is a joint body: a
+        merged mesh is one prim, and those need prims of their own. The node's OWN
+        frame is fine — marking a link that IS a joint's Body1 is the whole point.
+        """
+        if self._assembly is None or self._active_model == MODEL_SOURCE:
+            return
+        from ..model.simplify_marks import validate_marks
+
+        cids = [c for c in cids if self._assembly.get(c) is not None]
+        if not cids:
+            return
+        if on:
+            frame_cids, joints = self._live_frames_and_joints()
+            from ..model.live_frames import joint_body_cids
+
+            blockers = validate_marks(
+                self._assembly, self._simplify_nodes | set(cids),
+                frame_cids, joint_body_cids(joints))
+            # Only blockers involving THIS edit stop it (pre-existing marks were
+            # valid when set; a later joint can invalidate one, and that is the
+            # export's fatal error, not this click's).
+            blockers = [b for b in blockers if b.mark_cid in set(cids)]
+            if blockers:
+                cid_to_path, _ = build_path_maps(self._assembly)
+                QMessageBox.warning(
+                    self, "Mark Simplify Bodies",
+                    "Nothing was marked — merging these nodes would destroy prims "
+                    "that must stay addressable:\n\n"
+                    + "\n".join(b.describe(cid_to_path) for b in blockers[:8])
+                    + ("\n…" if len(blockers) > 8 else "")
+                    + "\n\nMark the individual links instead (a link that IS a "
+                      "joint body can be marked — only things INSIDE it are the "
+                      "problem).")
+                return
+        for cid in cids:
+            if on:
+                self._simplify_nodes.add(cid)
+            else:
+                self._simplify_nodes.discard(cid)
+            self._tree.set_simplify(cid, on)
+            self._config.update_node(cid, simplify_bodies=on)
+        self._save_config()
+        self._refresh_modified_indicators()
+        n_bodies = sum(len(self._assembly.descendants(c, include_self=True))
+                       for c in cids) if on else 0
+        self.statusBar().showMessage(
+            f"Marked {self._targets_label(cids)} — {n_bodies} components will "
+            f"export as {len(cids)} merged mesh(es)." if on else
+            f"Cleared Simplify Bodies on {self._targets_label(cids)}.")
+
+    def _confirm_frame_breaks_simplify(self, cid: str, what: str) -> bool:
+        """True to proceed with giving ``cid`` a live frame (joint / origin).
+
+        Export is STRICTLY fatal on a mark whose subtree gained a frame, so catch
+        it here — where the user can still choose — rather than at export time.
+        Offers to clear the containing mark; Cancel is the default.
+        """
+        if self._assembly is None or not self._simplify_nodes:
+            return True
+        from ..model.simplify_marks import marked_ancestor
+
+        outer = marked_ancestor(self._assembly, cid, self._simplify_nodes)
+        if outer is None:
+            return True
+        cid_to_path, _ = build_path_maps(self._assembly)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(what)
+        box.setText(
+            f"{cid_to_path.get(cid, cid)}\n\nis inside the Simplify Bodies mark on\n\n"
+            f"  {cid_to_path.get(outer, outer)}\n\n"
+            f"A merged mesh is ONE prim, so giving this node its own frame makes "
+            f"that mark impossible and every USD/OBJ export will fail until it is "
+            f"cleared.")
+        clear = box.addButton(f"Clear the mark and continue",
+                              QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not clear:
+            return False
+        self._set_simplify_nodes([outer], False)
+        return True
 
     # --- color override (leaf -> self; assembly -> descendants) ---
 
@@ -3932,6 +4071,10 @@ class MainWindow(QMainWindow):
             return
         if self._active_model == MODEL_SOURCE:
             return  # joints are a generated-model (asset/Static) concept
+        # A joint prim can't live inside a merged mesh — catch it here, where the
+        # user can still choose, rather than at export (which is strictly fatal).
+        if not self._confirm_frame_breaks_simplify(body1_cid, "Create Joint"):
+            return
         self._viewport.set_measure_mode(False)  # mutually exclusive with tools
         if getattr(self, "_xform_cmd", None) is not None:
             self._end_transform_command()
@@ -5403,6 +5546,10 @@ class MainWindow(QMainWindow):
             return
         comp = self._assembly.get(cid)
         if comp is None:
+            return
+        # A live origin frame can't live inside a merged mesh — same guard as
+        # Create Joint (export is strictly fatal on a mark whose subtree gained one).
+        if not self._confirm_frame_breaks_simplify(cid, "ReOrigin"):
             return
         # A MARKED-ASSET part CAN be re-origined here: the origin bakes into Main
         # and FLOWS INTO the asset by pruning (edit-at-Root-flows-down, like Edit

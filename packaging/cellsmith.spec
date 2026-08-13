@@ -113,7 +113,7 @@ _spec.loader.exec_module(_gen)
 _gen.main(["--out", _notices_file])
 if not os.path.exists(_notices_file):     # never fail the build over notices
     print("WARNING: THIRD-PARTY-NOTICES.md was not generated; "
-          "the distributable will ship without it.")
+          "the distributable will ship without it.", flush=True)
     _notices_file = None
 
 a = Analysis(
@@ -218,7 +218,12 @@ def _drop_gpl_readline(toc, label: str):
     if not dropped:
         return toc
     for entry in dropped:
-        print(f"cellsmith.spec: dropped GPL readline from a.{label}: {entry}")
+        # flush: PyInstaller logs to stderr (unbuffered) while this stdout is
+        # block-buffered under CI, which put these lines AFTER "Build
+        # complete!" in the log — a diagnostic printed out of order is a
+        # diagnostic that reads as belonging to the wrong phase.
+        print(f"cellsmith.spec: dropped GPL readline from a.{label}: {entry}",
+              flush=True)
     return [e for e in toc if e not in dropped]
 
 
