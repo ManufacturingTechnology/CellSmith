@@ -135,3 +135,48 @@ Architecture Decision Records for deliberate, non-obvious calls — especially o
 - **Confidence:** High — the trade was tested empirically and lost twice in one week.
   **Status:** Accepted. See `packaging.md` § *The PR gate runs the RELEASE build*,
   status `CS-160`.
+
+## ADR-0010 — Simplify Bodies merges TRIANGLES, and a stale mark is fatal EVERYWHERE
+- **Context:** Isaac Sim degrades badly when a robot/CNC link is hundreds or
+  thousands of separate `UsdGeom.Mesh` prims — the cost is per-prim/per-draw-call,
+  not per triangle. "Mark Simplify Bodies" (CS-162) exports a marked subtree as one
+  mesh. Two forks had to be settled.
+- **Decision (a) — triangle concatenation, NOT an OCC boolean.** `_baked_tris`
+  already puts every component in the same export space, so `_author_merged_mesh`
+  is vertex-index offsetting + `np.concatenate`. Triangle count and per-triangle
+  colors are unchanged; no seam is invented.
+  - **Alternatives:** `BRepAlgoAPI_Fuse` on the solids — rejected: minutes-to-hours
+    on thousands of solids, fails often, and destroys the per-face color indices
+    `_per_triangle_rgb` depends on. It also solves a problem nobody has (fewer
+    *surfaces*) instead of the one measured (fewer *prims*). Note this matches the
+    existing precedent: Edit-Bodies "Merge" is already deliberately compound
+    grouping, not a boolean (`geometry_edits_build.merge_bodies`).
+  - Corollary: because the writer has NO UsdShade materials and NO GeomSubsets,
+    merging is **color-lossless** — concatenated `uniform` displayColor says
+    exactly what N separate prims said. Verified on real geometry: `testB2` Static,
+    755 bodies → 1 prim, 3.78 M triangles and 924 k per-triangle colors identical.
+- **Decision (b) — a mark whose subtree contains a live frame or joint body is
+  REFUSED, and a STALE mark is FATAL on every export path** (subtree USD, composed
+  USD, OBJ). Checked against **STRICT descendants only** — the marked node's own
+  frame is fine and is preserved, which is what makes "mark each link" (the link IS
+  the joint's Body1) the workflow.
+  - **This deliberately diverges from ADR-0007's** "asset generation stays TOLERANT,
+    warn-don't-block" stance for dropped split recipes. Justified because the
+    failure modes are opposites: a dropped recipe **loses authored data**, so
+    blocking a build over it costs more than it saves; a silently-unmerged asset
+    **loses nothing** but silently reproduces the exact performance problem the
+    feature exists to fix, and the user would not notice until Isaac is slow again.
+    The user chose strict-everywhere explicitly (2026-08-06).
+  - The strictness is made livable by catching it EARLY, not by softening it:
+    `_set_simplify_nodes` refuses at click, and `_confirm_frame_breaks_simplify`
+    warns when Create Joint / ReOrigin would invalidate an existing mark.
+  - **Alternatives:** auto-split the merge at each frame boundary (fewest clicks,
+    but a mark then silently means something different from what was clicked);
+    tolerant + `CELLSMITH-WARN` (rejected per above).
+- **Revisit if:** (a) Isaac turns out to be bottlenecked by `uniform` displayColor
+  rather than prim count — then group by color into one mesh per material instead;
+  (b) strict export refusals become a nuisance in practice, i.e. marks are
+  routinely invalidated by later rigging. Then reconsider tolerant-with-warning.
+- **Confidence:** Medium-high — (a) is measured and firm; (b) is a user preference
+  chosen with the tradeoff stated. **Status:** Accepted. See `export.md` §
+  *Simplify Bodies*, `kinematic-joints.md`, status `CS-162`.

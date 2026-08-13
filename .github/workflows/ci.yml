@@ -68,7 +68,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        shell: bash -el {0}          # -l so conda's shell hook is active
+        # -l so conda's shell hook is active. ⛔ A step running under a LOGIN
+        # shell must never call the `exit` builtin: bash then sources
+        # ~/.bash_logout, and the status of ITS last command replaces yours —
+        # `exit 0` becomes exit 1 on an Ubuntu runner. This cost a CI round-trip
+        # once already (see .github/actions/build-linux/action.yml). Let the
+        # script fall off its end, or give the step `shell: bash`.
+        # Enforced by tests/test_workflow_shell_hygiene.py.
+        shell: bash -el {0}
     steps:
       - uses: actions/checkout@v7
       - name: Install the system libraries offscreen rendering needs

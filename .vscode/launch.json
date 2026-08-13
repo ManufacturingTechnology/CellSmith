@@ -101,6 +101,17 @@
             "args": ["${workspaceFolder}/test_files/testG1.step"]
         },
         {
+            "name": "testH1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testH1.step"]
+        },
+        {
             "name": "CellSmith (+ refresh doc screenshots)",
             "type": "debugpy",
             "request": "launch",

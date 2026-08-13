@@ -68,60 +68,12 @@ def main(argv: list[str]) -> int:
     # (uniform) when face_colors survive.
     bake_effective_appearance(cfg, asm)
 
-    # Custom-origin frames → LIVE joint Xforms in the USD (rig-ready). The bake
-    # made each frame'd component's local frame the declared joint frame, so
-    # only the SET of components matters here (their transforms are already
-    # authoritative). Paths a structure map moved don't resolve — those nodes
-    # simply export fully baked (cosmetic; the geometry is identical).
-    from ..model.geometry_edits import body_origin_paths, load_split_map
-    from ..model.scene_config import build_path_maps
-    from .frame_paths import inherited_folder_frame_paths, inherited_frame_paths
+    # Custom-origin frames → LIVE joint Xforms in the USD (rig-ready), plus the
+    # resolved UsdPhysics joints. Shared with the OBJ CLI so both agree on the
+    # live-frame set (see :mod:`..model.live_frames`).
+    from ..model.live_frames import live_frames_and_joints
 
-    _, path_to_cid = build_path_maps(asm)
-    # The joint-frame set = the config origin map PLUS the per-body origins from
-    # the split recipes (`body_origins`) — those are injected into the origin map
-    # only at bake, never persisted, so reconstruct their paths here.
-    frame_paths = set(store.get_origin_map(model) or {})
-    frame_paths |= body_origin_paths(load_split_map(store.get_split_map(model)))
-    # A generated model's OWN maps are empty for frames authored at Root and
-    # inherited by pruning — reconstruct those from the root maps, translated to
-    # this model's tree, so an asset/Static export keeps its live joint Xforms.
-    frame_paths |= inherited_frame_paths(store, model, cache.read_assets_stamp(step_path))
-    # Every restructure FOLDER is a live joint Xform (custom origin if set, else
-    # the parent-frame default) — its final path is recorded in the model's bake
-    # stamp. Plus any Main-level folder that pruned into this asset/Static.
-    stamp = cache.read_bake_stamp(step_path, variant) or {}
-    frame_paths |= set(stamp.get("folder_frame_paths") or [])
-    root_stamp = cache.read_bake_stamp(step_path, cache.ROOT_VARIANT) or {}
-    frame_paths |= inherited_folder_frame_paths(
-        root_stamp.get("folder_frame_paths"), model,
-        cache.read_assets_stamp(step_path))
-    frame_cids = {path_to_cid[p] for p in frame_paths if p in path_to_cid}
-
-    # Joints (USD UsdPhysics) — resolve each JointDef's Body1 (the map key) +
-    # Body0 path to cids; Body1 joins the live-frame set (its prim IS the joint
-    # pivot). Empty for the source/Main model (joints are asset/Static only) and
-    # for a jointless model → no physics authored. Moved-node paths skipped + logged.
-    from ..model.geometry_edits import load_joint_map
-
-    joints = []
-    for b1_path, jd in load_joint_map(store.get_joint_map(model)).items():
-        b1 = path_to_cid.get(b1_path)
-        if b1 is None:
-            log.warning("skipping joint on %s (unresolved Body1)", b1_path)
-            continue
-        b0 = None                                  # "" → root/global base
-        if jd.body0:
-            b0 = path_to_cid.get(jd.body0)
-            if b0 is None:
-                log.warning("skipping joint on %s (unresolved Body0 %s)",
-                            b1_path, jd.body0)
-                continue
-        frame_cids.add(b1)
-        joints.append(dict(
-            body1_cid=b1, body0_cid=b0, name=jd.name, joint_type=jd.joint_type,
-            axis=jd.axis, flip=jd.flip, stiffness=jd.stiffness, damping=jd.damping,
-            limit_enabled=jd.limit_enabled, lower=jd.lower, upper=jd.upper))
+    frame_cids, joints = live_frames_and_joints(store, model, step_path, asm, log)
 
     # Orientation + the global datum are BAKED into the main-stage geometry —
     # exports apply only the unit scale (and the per-export local-origin pick).
@@ -132,6 +84,7 @@ def main(argv: list[str]) -> int:
         origin=_export_origin(origin_mode, asm.get(root_id)),
         origin_frame_cids=frame_cids,
         joints=joints,
+        simplify_cids=cfg.simplify_ids(),
     )
     print(f"exported {n} meshes to {out_path}", flush=True)
     return 0

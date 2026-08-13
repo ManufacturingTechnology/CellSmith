@@ -151,6 +151,10 @@ class NodeConfig(BaseModel):
     suppressed: bool = False   # excluded from export + not shown (red marker)
     color_override: Optional[List[float]] = None  # RGB 0..1; overrides display color
     is_asset: bool = False     # marked as an Asset (blue marker; source model only)
+    # Merge this node's whole subtree into ONE mesh at USD/OBJ export time (cyan
+    # marker; GENERATED models only — assets/Static, never Source). Export-only:
+    # nothing about the bake, the viewport or the STEP path changes.
+    simplify_bodies: bool = False
 
     def is_default(self) -> bool:
         return self == NodeConfig()
@@ -263,6 +267,9 @@ class SceneConfig(BaseModel):
 
     def asset_ids(self) -> set[str]:
         return {cid for cid, n in self.nodes.items() if n.is_asset}
+
+    def simplify_ids(self) -> set[str]:
+        return {cid for cid, n in self.nodes.items() if n.simplify_bodies}
 
 
 def resolve_color_overrides(config: "SceneConfig", assembly) -> Dict[str, tuple]:
@@ -489,6 +496,8 @@ def _describe_unmatched(key: str, node) -> str:
             flags.append("color override")
         if node.get("is_asset"):
             flags.append("asset")
+        if node.get("simplify_bodies"):
+            flags.append("simplify bodies")
     return f"{key}  →  {', '.join(flags) if flags else 'custom settings'}"
 
 

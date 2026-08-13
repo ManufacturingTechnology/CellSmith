@@ -4137,7 +4137,11 @@ class EditBodiesWindow(QMainWindow):
     # --------------------------------------------------------- apply --
 
     def _update_apply_enabled(self) -> None:
-        self._apply_btn.setEnabled(len(self._final_lids) >= 2)
+        # ONE source of truth with the bake (``SplitRecipe.is_effective``): any op
+        # sequence is applicable, including one that lands on a SINGLE final body
+        # (merge-all-into-one, delete-down-to-one, transform the lone body). Only
+        # an untouched component (one body, no ops) has nothing to Apply.
+        self._apply_btn.setEnabled(self._recipe().is_effective())
 
     def _on_reset(self) -> None:
         self._restore_snapshot(self._open_snapshot)
@@ -4146,10 +4150,10 @@ class EditBodiesWindow(QMainWindow):
         self._status.setText("Reset to the state when the window opened.")
 
     def _on_apply(self) -> None:
-        if len(self._final_lids) < 2:
-            self._status.setText("Need at least 2 bodies to Apply.")
-            return
         recipe = self._recipe()
+        if not recipe.is_effective():
+            self._status.setText("Nothing to Apply — the component is unchanged.")
+            return
         self.applied.emit(self._model_id, self._base_path,
                           recipe.model_dump(exclude_defaults=True))
         self.close()

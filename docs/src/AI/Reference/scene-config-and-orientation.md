@@ -87,6 +87,13 @@ round-trip verbatim.
   field: file-wide preference → `GlobalConfig`; Source→Main bake input or other
   model data → `ModelSettings` (bake inputs must ALSO join
   `source_to_main_inputs` + the stamp); per-node → `NodeConfig`.
+- **Adding a `NodeConfig` field costs NO schema bump.** `_minimize_section` dumps
+  each node with `exclude_defaults=True` and drops all-default nodes entirely, so
+  a `bool = False` field is absent from every existing file and both forward- and
+  backward-compatible with schema v3. (v2→v3 was bumped for a STRUCTURAL split,
+  not for a new field.) `simplify_bodies` (CS-162) was added this way. Two spots
+  enumerate flags BY HAND and need the new name: `_describe_unmatched` (the
+  unmatched-key report) and the `*_ids()` accessors on `SceneConfig`.
 
 ## Orientation math (`src/model/orientation.py`, pxr/OCC/VTK-free)
 `orientation_matrix(up_direction, z_rotation_deg)` = 3x3 source→export (chosen axis →

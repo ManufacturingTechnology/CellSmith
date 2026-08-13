@@ -41,27 +41,78 @@ and the tag, none of which is release-branch-specific.
 escape hatch is a `paths`-filter or a label-gated job — **not** a cheaper build,
 which is the thing that failed.
 
-!!! warning "The artifact-assertion steps use `shell: bash`, deliberately — do not 'fix' them to `bash -el {0}`"
+!!! danger "⭐ NEVER call `exit` from a step whose shell is `bash -el {0}` — `~/.bash_logout` overwrites the exit status"
 
-    Every other step in these actions needs the conda env, so it uses
-    `shell: bash -el {0}` (a **login** shell — that is what activates `CellSmithEnv`).
-    The `Assert … artifacts were produced` steps only glob and stat files, and they
-    are pinned to plain `shell: bash` (`bash --noprofile --norc -eo pipefail {0}`).
+    **This is the cause of the `build-linux` failure of 2026-08-04**, where
+    `Assert both Linux artifacts were produced` printed both of its `ok` lines,
+    computed `rc=0`, ran `exit 0`, and the runner still reported *"Process
+    completed with exit code 1"*. It was recorded here as **root cause unknown**;
+    it is now proven, and it is not specific to that step.
 
-    Why: the first version of that step used a login shell plus `compgen -G`, printed
-    **both** `ok` lines, and **still exited 1** — with no `::error::` emitted, so `rc`
-    was provably never set to 1. It could not be reproduced locally (same script
-    extracted from the YAML, same filenames including the `~` in the `.deb` name, run
-    as `bash -e -l` → exit 0). CRLF, YAML mangling and a hidden third iteration were
-    ruled out by probe. **Root cause unknown ❓.** The step therefore drops both
-    unexplained variables (login profile, `compgen`) and **prints `verdict: rc=N`
-    before exiting** — so if it ever fails again, `verdict: rc=0` next to a failed
-    step proves the fault is in the shell wrapper rather than the script, which is
-    exactly what the first version could not tell us.
+    [bash(1), INVOCATION](https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html)
+    (verified locally against `/usr/share/man/man1/bash.1.gz`, line 347):
 
-    ⚠️ Its glob loop writes `if [ -e "$f" ]; then hit="$f"; fi`, never
+    > When an interactive login shell exits, **or a non-interactive login shell
+    > executes the `exit` builtin command**, bash reads and executes commands from
+    > the file `~/.bash_logout`, if it exists.
+
+    `bash -el {0}` is a non-interactive **login** shell — that `-l` is what
+    activates `CellSmithEnv`. So any step that calls `exit` sources
+    `~/.bash_logout`, and **the status of that file's last command becomes the
+    step's status**. On an Ubuntu runner `/home/runner/.bash_logout` is the
+    `/etc/skel` default, ending in
+
+    ```bash
+    if [ "$SHLVL" = 1 ]; then
+        [ -x /usr/bin/clear_console ] && /usr/bin/clear_console -q
+    fi
+    ```
+
+    `SHLVL` is `1` (the runner spawns bash from a non-shell parent, so bash sets it
+    itself) and no terminal is attached, so `clear_console -q` exits 1 — and so does
+    the step, however it ended.
+
+    **Probe** (2026-08-13, Debian/WSL, bash 5.2.37, `SHLVL` unset in the parent,
+    skel `~/.bash_logout` in `HOME`):
+
+    | Step shell | Script | Step exit |
+    |---|---|---|
+    | `bash -el {0}` | `exit 0` | **1** ← the CI failure, reproduced |
+    | `bash -el {0}` | falls off the end | 0 ← why every *other* `-el` step passes |
+    | `bash --noprofile --norc -eo pipefail {0}` | `exit 0` | 0 ← the fix |
+    | `bash -el {0}` | `exit 1` | 1 (a real failure still fails) |
+    | `bash -el {0}`, **no** `~/.bash_logout` | `exit 0` | 0 ← why it "could not be reproduced" |
+
+    The two variables that decide it — the runner's `~/.bash_logout` and `SHLVL` —
+    are both **outside the script**, which is why reading the script harder was
+    never going to find it.
+
+    **The rule:** a login-shell step must not call `exit`. Let the script fall off
+    its end (the shell's status is then its last command's, and `~/.bash_logout` is
+    never read), move the deciding logic into a called script (`bash foo.sh` is a
+    child, non-login shell — its `exit` is unaffected, which is why
+    `verify-payload.sh` was never hit by this), or drop the login shell. Both
+    `Assert … artifacts were produced` steps take the last option: globbing and
+    stat'ing files needs no conda env, so they are pinned to plain `shell: bash`
+    (= `bash --noprofile --norc -eo pipefail {0}`).
+
+    **Enforced by `tests/test_workflow_shell_hygiene.py`** across both workflows and
+    both composite actions, including the job-level `defaults.run.shell` inheritance
+    that makes the trap easy to walk into. Its negative control runs the detector
+    against the pre-fix `action.yml` at `7d95a40` and requires it to flag exactly
+    that step.
+
+    The steps still print `verdict: rc=N` before exiting. That is now belt-and-braces
+    rather than the only diagnostic: `verdict: rc=0` beside a red step would mean the
+    wrapper, not the script.
+
+    ⚠️ Their glob loop writes `if [ -e "$f" ]; then hit="$f"; fi`, never
     `[ -e "$f" ] && hit="$f"` — under `-e` the no-match path would abort the script
     instead of reporting the missing artifact. Same trap as the `.deb` self-checks.
+    Behaviour re-verified 2026-08-13 by extracting both steps' scripts from the YAML
+    and running them in WSL under GitHub's exact `shell: bash` against a fake `dist/`
+    (including the `~` in the `.deb` name): both-present → 0, either missing → 1,
+    nothing built → 1, for both actions.
 
 **CellSmith-specific adaptations** (none of these apply to MTConnectExplorer, which is a
 pip-venv onefile build):

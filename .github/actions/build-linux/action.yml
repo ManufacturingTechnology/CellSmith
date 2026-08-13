@@ -70,16 +70,46 @@ runs:
       # Cheap, and it belongs HERE rather than in release.yml's collect step: a
       # missing artifact is a build defect, so the gate must see it too.
       #
-      # ⛔ `shell: bash`, NOT `bash -el {0}` — this step only globs and stats
-      # files, so it has no business loading the conda login profile. The first
-      # version used a login shell plus `compgen -G`, printed BOTH ok lines, and
-      # still exited 1; that could not be reproduced under `bash -e -l` locally
-      # with the same script and the same filenames. So this version removes both
-      # unexplained variables (login profile, `compgen`) and — importantly —
-      # PRINTS ITS OWN VERDICT. If the log ever again shows "verdict: rc=0"
-      # followed by a failed step, the cause is provably the shell wrapper and
-      # not this script, which is the one thing the first version could not tell
-      # us. `shell: bash` is `bash --noprofile --norc -eo pipefail {0}`.
+      # ⛔ `shell: bash`, NOT `bash -el {0}`. THIS IS THE FIX FOR A REAL FAILURE,
+      # NOT A STYLE CHOICE — the login-shell version of this step printed both
+      # `ok` lines, computed rc=0, ran `exit 0`, and the runner still reported
+      # "Process completed with exit code 1".
+      #
+      # ROOT CAUSE — `~/.bash_logout` hijacks the exit status. bash(1), INVOCATION:
+      #   "When an interactive login shell exits, or a non-interactive login shell
+      #    executes the exit builtin command, bash reads and executes commands
+      #    from the file ~/.bash_logout, if it exists."
+      #   https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html
+      # `bash -el {0}` is a non-interactive LOGIN shell, and this step is the only
+      # one in the action that calls the `exit` builtin — so it is the only one
+      # that sources ~/.bash_logout, and the status of that file's last command
+      # becomes the shell's status, overriding `exit 0`. On an Ubuntu runner
+      # /home/runner/.bash_logout is the /etc/skel default, whose last command is
+      #     if [ "$SHLVL" = 1 ]; then
+      #         [ -x /usr/bin/clear_console ] && /usr/bin/clear_console -q
+      #     fi
+      # SHLVL is 1 (the runner spawns bash from a non-shell parent) and there is
+      # no terminal, so `clear_console -q` exits 1 → the step exits 1.
+      #
+      # Probed 2026-08-13 (Debian/WSL, bash 5.2.37), SHLVL unset in the parent:
+      #   bash -el + `exit 0`, skel .bash_logout        → exit 1   ← the CI failure
+      #   bash -el, script with NO `exit` builtin       → exit 0   ← why every
+      #                                                              other -el step
+      #                                                              in this action
+      #                                                              passes
+      #   bash --noprofile --norc -eo pipefail + exit 0 → exit 0   ← this step now
+      #   bash -el + `exit 1`                           → exit 1   (still fails
+      #                                                              when it should)
+      # The earlier local repro said "cannot reproduce" because it ran with a HOME
+      # that had no ~/.bash_logout (and/or SHLVL≠1) — the two variables that
+      # actually matter, neither of which is in the script.
+      #
+      # ⭐ THE RULE, enforced by tests/test_workflow_shell_hygiene.py: a step whose
+      # shell is a login shell must never call `exit`. Here that is free — globbing
+      # and stat'ing files needs no conda env — so the step drops the login shell
+      # entirely. `shell: bash` is `bash --noprofile --norc -eo pipefail {0}`.
+      # It still prints `verdict: rc=N`, so "verdict: rc=0" beside a red step would
+      # again mean the wrapper, not the script.
       shell: bash
       run: |
         rc=0

@@ -57,7 +57,7 @@ untouched by `_minimize_raw`; store accessors `get/set_split_map`,
   REQUIRED either way (a full plane severs unrelated limbs of concave bodies —
   P2). `body_count` is recorded when the
   user Tests; the bake FAILS LOUD on drift (source geometry changed).
-  **A ZERO-CUT recipe is VALID** (`is_effective` = `body_count >= 2`): it
+  **A ZERO-CUT recipe is VALID**: it
   DECOMPOSES a multi-solid leaf (a compound holding several solids — e.g.
   testB1's M-710iD70 leaf = 15 solids × 6 occurrences) into its existing
   solids; `run_split` then skips the boolean splitter and serves
@@ -82,6 +82,21 @@ untouched by `_minimize_raw`; store accessors `get/set_split_map`,
   never trust it. Splitter recipe (`run_split`): `BRepAlgoAPI_Splitter` +
   bounded `BRepBuilderAPI_MakeFace(gp_Pln(gp_Ax3(o,n,x)), u±, v±)` tools,
   `SetNonDestructive(True)`, `SetRunParallel(False)`, fuzzy 1e-5.
+- **⭐ `is_effective()` — what makes a recipe APPLICABLE (current, op-sequence
+  format).** `len(final_ids()) >= 2 or bool(ops)`. Two INDEPENDENT ways to
+  qualify: **≥2 final bodies** (a zero-op decompose of a multi-solid leaf, or any
+  split), **or ANY op at all**. The second clause is what lets an op sequence land
+  on ONE final body and still be a real edit — **merge-ALL-into-one** (fuse a
+  leaf's / an assembly's N solids into a single body), **delete-down-to-one**, and
+  a **transform of the lone body**. Gating on the body count alone silently
+  disabled the Component Editor's window-level Apply for those and dropped the
+  recipe on `dump_split_map` (edit vanishes + reverts). Only a genuine no-op — one
+  body, zero ops — is ineffective. The window's Apply button calls this SAME
+  predicate (`_update_apply_enabled` → `self._recipe().is_effective()`), so the GUI
+  gate and the bake gate (`resolve_split_targets`) can never disagree.
+  Probe-verified: `run_body_ops` on a 3-box compound with a merge-all op returns
+  one final body (`o0:0`) holding 3 solids, and the recipe round-trips through
+  `dump_split_map`/`load_split_map`.
 - **Split bake = IN-PLACE product conversion (probe P4b — better than
   replace-instance)**: body products are `AddShape`d + `AddComponent`ed onto
   the split leaf's OWN product label, turning it into an assembly WITHOUT
@@ -142,7 +157,7 @@ untouched by `_minimize_raw`; store accessors `get/set_split_map`,
   name)`, the same normalized join the bake uses) or body/link joint frames get
   no live Xform. The frame VALUES come from `comp.transform` (authoritative
   post-bake). **For a GENERATED model (asset/Static) the frame set ALSO unions
-  `export/frame_paths.inherited_frame_paths(store, model, stamp)`** — frames
+  `model/live_frames.inherited_frame_paths(store, model, stamp)`** — frames
   authored at ROOT bake into Root.Main and flow into the asset by PRUNING, so
   the asset's OWN origin/split maps are empty and the naive `origin_map |
   body_origin_paths` yields nothing (the "asset export drops the body origins,
@@ -155,6 +170,16 @@ untouched by `_minimize_raw`; store accessors `get/set_split_map`,
   Root.Main export of the same occurrence. Both `usd_cli` and `compose_cli`
   union it (pxr-E2E verified — `test_asset_export_frames`: the asset USD's body
   prim carries `xformOp:transform`).
+- ⭐ **`model/live_frames.live_frames_and_joints(store, model, step_path, asm)` is
+  the ONE derivation of "which components own a live frame, and what are the
+  resolved joints".** It was `export/frame_paths` until CS-162 moved it to the
+  model layer: the GUI needs the identical set to validate Simplify-Bodies marks
+  (`export.md` § *Simplify Bodies*), and `src/gui/` must not import `src/export/`.
+  It is pure — no OCC/VTK/pxr, only `io_step.cache` for the bake stamps. `usd_cli`
+  and `obj_cli` call it; `compose_cli` still assembles the set inline because it
+  additionally DISCARDS the single root (the occurrence placement carries that
+  frame). **Do not add a second derivation** — a mark that is fatal for USD must
+  be fatal for OBJ, and the click-time dialog must agree with both.
 - **GUI**: **Edit Bodies lives in the Transform Source window's context menus**
   (both trees + viewport, single leaf) — recipes land PENDING in the window's
   working copy of the split map, are validated on the window's ONE Apply, and
@@ -201,7 +226,7 @@ untouched by `_minimize_raw`; store accessors `get/set_split_map`,
     subset that drives the tree's teal glyph); `usd_cli`/`compose_cli` union the
     former into `origin_frame_cids` (value from the baked `comp.transform`). A Main-level
     folder pruned into an asset/Static is picked up via
-    `frame_paths.inherited_folder_frame_paths` (root stamp folder paths →
+    `live_frames.inherited_folder_frame_paths` (root stamp folder paths →
     occurrence-relative, mirrors `inherited_frame_paths`). STEP/OBJ inherit the
     baked folder PLACEMENT (assembly local frame = joint) automatically — no
     live-Xform concept there.

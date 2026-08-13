@@ -88,6 +88,10 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
+        # ⛔ LOGIN shell — no step under this default may call the `exit`
+        # builtin; ~/.bash_logout's last command would replace its status (an
+        # `exit 0` reported as exit 1). See .github/actions/build-linux/action.yml
+        # and tests/test_workflow_shell_hygiene.py.
         shell: bash -el {0}
     steps:
       - uses: actions/checkout@v7

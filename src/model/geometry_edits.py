@@ -518,12 +518,16 @@ class SplitRecipe(BaseModel):
         return self.display_names().get(lid) or self.names.get(lid) or lid
 
     def is_effective(self) -> bool:
-        # >=2 final bodies is a real edit (a lone-solid leaf with no ops = 1 body
-        # = no-op; a decompose or any split reaches >=2). A DELETE op is also a
-        # real edit even if it leaves 1 final body (it removes geometry from the
-        # output) — else a delete-to-one recipe would drop on dump + revert.
-        return len(self.final_ids()) >= 2 \
-            or any(op.kind == "delete" for op in self.ops)
+        # A recipe is a real edit when it changes the component's geometry or
+        # structure. Two INDEPENDENT ways to qualify:
+        #   - >=2 final bodies — a decompose (multi-solid leaf, zero ops) or any
+        #     split reaches this.
+        #   - ANY op at all — an op sequence can legitimately land on ONE final
+        #     body and still be a real edit: MERGE-ALL fuses N solids into one,
+        #     DELETE removes geometry, TRANSFORM moves the lone body. Gating on
+        #     the body count alone made those recipes drop on dump and revert.
+        # Only a genuine no-op (a lone-solid leaf with no ops) is dropped.
+        return len(self.final_ids()) >= 2 or bool(self.ops)
 
 
 # --- raw config maps ----------------------------------------------------------
@@ -732,8 +736,9 @@ def resolve_split_targets(base: Assembly,
         # descendant solids (assembly frame) are the initial bodies and the bake
         # REPLACES its subtree with the result. Both are valid targets.
         if not recipe.is_effective():
-            problems.append(f"edit recipe for {path} yields fewer than 2 bodies "
-                            f"(initial={recipe.initial_count}, ops={len(recipe.ops)})")
+            problems.append(f"edit recipe for {path} is a no-op — one body and no "
+                            f"operations (initial={recipe.initial_count}, "
+                            f"ops={len(recipe.ops)})")
             continue
         key = comp.product_entry or f"cid:{cid}"
         dumped = recipe.model_dump()

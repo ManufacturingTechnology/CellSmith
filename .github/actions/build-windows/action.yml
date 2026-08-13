@@ -49,9 +49,13 @@ runs:
       # lives in the shared action: the PR gate must catch it, not just release.
       #
       # `shell: bash` (= bash --noprofile --norc -eo pipefail {0}), not
-      # `bash -el {0}`: globbing and stat'ing files needs no conda env, and the
-      # login-shell variant of this step failed on Linux having printed nothing
-      # but ok lines. See the sibling build-linux action for the full note.
+      # `bash -el {0}`: globbing and stat'ing files needs no conda env, and a
+      # LOGIN shell that runs the `exit` builtin sources ~/.bash_logout, whose
+      # last command's status then overrides the `exit`. That is what failed the
+      # Linux twin (it exited 1 after printing only `ok` lines); Git Bash on the
+      # Windows runner has no ~/.bash_logout today, but the rule is the same and
+      # tests/test_workflow_shell_hygiene.py enforces it on both. Full write-up
+      # and the probe: the sibling build-linux action.
       shell: bash
       run: |
         rc=0
