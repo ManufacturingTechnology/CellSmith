@@ -32,6 +32,9 @@ from ..model.orientation import (
     export_transform, mat4_inv_rigid, mat4_mul, rot_about_axis,
     axis_frame_matrix, _mat3_mul, _mat3_vec,
 )
+from ..model.simplify_marks import (
+    require_valid_marks, resolve_simplify_groups, swallowed_ids,
+)
 
 log = logging.getLogger(__name__)
 
@@ -85,9 +88,9 @@ def _excluded_ids(assembly, root_id: str, suppressed) -> set:
     return excluded
 
 
-def _author_mesh(stage, prim_path: Sdf.Path, comp, extra_transform,
-                 enclosing_frame=None) -> bool:
-    """Author ``comp``'s tessellation as a UsdGeom.Mesh at ``prim_path``.
+def _baked_tris(comp, extra_transform, enclosing_frame=None):
+    """``(points_f32 (N,3), tri_idx_i32 (M,3), tri_rgb_f32 (M,3) | None)`` for one
+    component, or ``None`` when it carries no usable tessellation.
 
     Points are FULLY baked: local → world (``comp.transform``) → export frame
     (``extra_transform`` = orientation + unit scale + local-origin shift). Baking
@@ -98,40 +101,117 @@ def _author_mesh(stage, prim_path: Sdf.Path, comp, extra_transform,
     frame's meter-space rigid 4x4), the baked points are re-expressed RELATIVE
     to it — the composed stage position is unchanged, but the frame stays live
     for rigging.
+
+    Because everything is baked here, MERGING components is pure vertex-index
+    offsetting — see :func:`_author_merged_mesh`.
     """
     verts = np.ascontiguousarray(comp.vertices, dtype=np.float64)
     faces = np.ascontiguousarray(comp.faces, dtype=np.int64)
     if verts.ndim != 2 or verts.shape[1] != 3 or faces.size == 0 or faces.size % 4 != 0:
-        return False
+        return None
     world = _to_world(_to_world(verts, comp.transform), extra_transform)
     if enclosing_frame is not None:
         world = _to_world(world, mat4_inv_rigid(enclosing_frame))
     world = world.astype(np.float32)
     if not np.all(np.isfinite(world)):
-        return False
-
+        return None
     quads = faces.reshape(-1, 4)          # rows: [3, a, b, c]
-    counts = np.full(quads.shape[0], 3, dtype=np.int32)
-    indices = np.ascontiguousarray(quads[:, 1:].reshape(-1), dtype=np.int32)
+    tri_idx = np.ascontiguousarray(quads[:, 1:], dtype=np.int32)
+    return world, tri_idx, _per_triangle_rgb(comp, tri_idx.shape[0])
+
+
+def _write_mesh_prim(stage, prim_path: Sdf.Path, points, tri_idx,
+                     tri_rgb=None, const_rgb=None) -> None:
+    """Author one ``UsdGeom.Mesh`` from already-baked triangle arrays.
+
+    Color is a ``displayColor`` primvar — ``uniform`` (one RGB per triangle) when
+    ``tri_rgb`` is given, else ``constant`` from ``const_rgb``. There are no
+    UsdShade materials or GeomSubsets anywhere in this writer, which is exactly
+    why merging components is color-lossless: concatenated per-triangle arrays
+    say the same thing N separate prims did.
+    """
+    counts = np.full(tri_idx.shape[0], 3, dtype=np.int32)
+    indices = np.ascontiguousarray(tri_idx.reshape(-1), dtype=np.int32)
 
     mesh = UsdGeom.Mesh.Define(stage, prim_path)
-    mesh.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(world))
+    mesh.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(points))
     mesh.CreateFaceVertexCountsAttr(Vt.IntArray.FromNumpy(counts))
     mesh.CreateFaceVertexIndicesAttr(Vt.IntArray.FromNumpy(indices))
     # Polygon mesh, not a subdivision surface (Isaac should render as authored).
     mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
-    lo = Gf.Vec3f(*world.min(axis=0).tolist())
-    hi = Gf.Vec3f(*world.max(axis=0).tolist())
+    lo = Gf.Vec3f(*points.min(axis=0).tolist())
+    hi = Gf.Vec3f(*points.max(axis=0).tolist())
     mesh.CreateExtentAttr(Vt.Vec3fArray([lo, hi]))
     # Per-FACE color (uniform = one color per triangle) for multi-colored parts;
     # otherwise a single constant color. Isaac/Hydra honor uniform displayColor.
-    tri_rgb = _per_triangle_rgb(comp, quads.shape[0])
     if tri_rgb is not None:
         pv = mesh.CreateDisplayColorPrimvar(UsdGeom.Tokens.uniform)
-        pv.Set(Vt.Vec3fArray.FromNumpy(tri_rgb))
-    elif comp.color is not None:
+        pv.Set(Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(tri_rgb, dtype=np.float32)))
+    elif const_rgb is not None:
         pv = mesh.CreateDisplayColorPrimvar(UsdGeom.Tokens.constant)
-        pv.Set(Vt.Vec3fArray([Gf.Vec3f(float(comp.color[0]), float(comp.color[1]), float(comp.color[2]))]))
+        pv.Set(Vt.Vec3fArray([Gf.Vec3f(float(const_rgb[0]), float(const_rgb[1]),
+                                       float(const_rgb[2]))]))
+
+
+def _author_mesh(stage, prim_path: Sdf.Path, comp, extra_transform,
+                 enclosing_frame=None) -> bool:
+    """Author ``comp``'s tessellation as a UsdGeom.Mesh at ``prim_path``."""
+    baked = _baked_tris(comp, extra_transform, enclosing_frame)
+    if baked is None:
+        return False
+    points, tri_idx, tri_rgb = baked
+    _write_mesh_prim(stage, prim_path, points, tri_idx, tri_rgb, comp.color)
+    return True
+
+
+def _author_merged_mesh(stage, prim_path: Sdf.Path, comps, extra_transform,
+                        enclosing_frame=None) -> bool:
+    """Author MANY components as ONE UsdGeom.Mesh at ``prim_path`` ("Simplify Bodies").
+
+    Isaac Sim's cost is per-prim / per-draw-call, so folding a link's hundreds of
+    body prims into one is the whole point of the mark. This is a triangle-array
+    CONCATENATION, not an OCC boolean: :func:`_baked_tris` has already put every
+    component in the same export space, so merging is index offsetting plus
+    ``np.concatenate``. Triangle count is unchanged and no seam is invented.
+
+    Color: a component with per-face colors already yields a per-triangle array;
+    a single-color one is TILED up to per-triangle so one ``uniform`` array
+    covers the merge. When every member resolves to the same single RGB the
+    result collapses back to a ``constant`` primvar — same picture, less data.
+
+    ``comps`` should be in assembly walk order so output is deterministic.
+    """
+    pts_parts, idx_parts, rgb_parts = [], [], []
+    solid_rgb: set = set()
+    per_face_seen = False
+    offset = 0
+    for comp in comps:
+        baked = _baked_tris(comp, extra_transform, enclosing_frame)
+        if baked is None:
+            continue
+        points, tri_idx, tri_rgb = baked
+        pts_parts.append(points)
+        idx_parts.append(tri_idx + offset)
+        offset += points.shape[0]
+        if tri_rgb is None:
+            base = comp.color if comp.color is not None else _DEFAULT_RGB
+            solid_rgb.add(tuple(round(float(v), 6) for v in base[:3]))
+            tri_rgb = np.tile(np.asarray(base[:3], dtype=np.float32),
+                              (tri_idx.shape[0], 1))
+        else:
+            per_face_seen = True
+        rgb_parts.append(tri_rgb)
+    if not pts_parts:
+        return False
+
+    points = pts_parts[0] if len(pts_parts) == 1 else np.concatenate(pts_parts, axis=0)
+    tri_idx = idx_parts[0] if len(idx_parts) == 1 else np.concatenate(idx_parts, axis=0)
+    if not per_face_seen and len(solid_rgb) == 1:
+        _write_mesh_prim(stage, prim_path, points, tri_idx,
+                         None, next(iter(solid_rgb)))
+    else:
+        rgb = rgb_parts[0] if len(rgb_parts) == 1 else np.concatenate(rgb_parts, axis=0)
+        _write_mesh_prim(stage, prim_path, points, tri_idx, rgb, None)
     return True
 
 
@@ -376,6 +456,7 @@ def write_subtree_usd(
     origin=None,
     origin_frame_cids=None,
     joints=None,
+    simplify_cids=None,
 ) -> int:
     """Write the meshed subtree at ``root_id`` to ``out_path``. Returns mesh count.
 
@@ -405,6 +486,10 @@ def write_subtree_usd(
     (ArticulationRootAPI + RigidBodyAPI). Each Body1 is auto-added to the live-frame
     set so its prim IS the joint pivot. An empty/None ``joints`` authors no physics
     (byte-identical to before).
+
+    ``simplify_cids``: nodes marked "Simplify Bodies" — each one's whole subtree
+    collapses into a single merged mesh at that node's prim. Strictly validated
+    (see :func:`_author_components`); an empty/None set changes nothing.
     """
     root = assembly.get(root_id)
     if root is None:
@@ -424,7 +509,7 @@ def write_subtree_usd(
     n_meshes = _author_components(stage, assembly, included, top_path,
                                   {root_id}, export, scale,
                                   set(origin_frame_cids or ()) & included,
-                                  joints)
+                                  joints, simplify_cids)
 
     if n_meshes == 0:
         stage.GetRootLayer().Save()
@@ -439,7 +524,7 @@ def write_subtree_usd(
 
 def _author_components(stage, assembly, included: set, top_path: Sdf.Path,
                        root_ids: set, export, scale: float,
-                       frame_cids: set, joints=None) -> int:
+                       frame_cids: set, joints=None, simplify_cids=None) -> int:
     """Author every included component under ``top_path``.
 
     A SINGLE root anchors AT ``top_path`` (the selected component IS the
@@ -448,11 +533,40 @@ def _author_components(stage, assembly, included: set, top_path: Sdf.Path,
 
     ``joints`` (resolved entries) are authored as a final pass — each Body1 is
     forced into the live-frame set here so its prim IS the joint pivot.
+
+    ``simplify_cids`` ("Mark Simplify Bodies") — each marked node's whole subtree
+    is authored as ONE merged mesh AT the marked node's prim; its descendants get
+    no prims at all. Validated STRICTLY here (the one place both the subtree and
+    the composed export funnel through): a mark whose subtree contains a live
+    frame or a joint body is fatal, because those need prims of their own. The
+    marked node's OWN frame is fine — it becomes the merged prim and keeps its
+    ``xformOp``, which is what makes "mark each link" the workflow.
     """
     single = len(root_ids) == 1
     # Every jointed Body1 must be a live-frame prim (its Xform = the joint pivot).
     frame_cids = set(frame_cids) | {
         j["body1_cid"] for j in (joints or []) if j["body1_cid"] in included}
+
+    marks = set(simplify_cids or ()) & included
+    simplify_groups: dict = {}
+    merge_members: dict = {}
+    swallowed: set = set()
+    if marks:
+        joint_bodies = {j[k] for j in (joints or []) for k in ("body0_cid", "body1_cid")
+                        if j.get(k)}
+        require_valid_marks(assembly, marks, frame_cids, joint_bodies)
+        simplify_groups = resolve_simplify_groups(assembly, marks, included)
+        swallowed = swallowed_ids(simplify_groups)
+        # Gather members in assembly WALK order (descendants() is DFS-by-stack, so
+        # it would make output order depend on the child index) — one O(n) pass,
+        # done up front because a mark is reached BEFORE the members it swallows.
+        merge_members = {cid: [] for cid in simplify_groups}
+        owner_of = {m: mark for mark, members in simplify_groups.items() for m in members}
+        for comp in assembly.components:
+            owner = owner_of.get(comp.component_id)
+            if owner is not None and comp.has_mesh:
+                merge_members[owner].append(comp)
+
     path_of: dict = {}
     used_names: dict = {}
 
@@ -469,11 +583,16 @@ def _author_components(stage, assembly, included: set, top_path: Sdf.Path,
     frame_of: dict = {}
 
     n_meshes = 0
+    n_merged = 0
     # assembly.components is in walk order (parents precede children), so each
     # component's parent prim already exists when we reach it.
     for comp in assembly.components:
         cid = comp.component_id
         if cid not in included:
+            continue
+        if cid in swallowed:
+            # Folded into an ancestor's merged mesh — no prim, no path, and no
+            # name reserved (so sibling names are unaffected by the mark).
             continue
         if cid in root_ids and single:
             prim_path = top_path
@@ -491,10 +610,18 @@ def _author_components(stage, assembly, included: set, top_path: Sdf.Path,
         # ``has_mesh`` selects geometry-bearing leaves for BOTH backends: a
         # STEP leaf has ``shape`` + tessellated verts; a MESH leaf has verts with
         # ``shape=None``. (Gating on ``shape`` here would drop every mesh leaf.)
-        meshed = comp.has_mesh and _author_mesh(
-            stage, prim_path, comp, export, enclosing_frame=frame_of[cid])
+        members = None
+        if cid in simplify_groups:
+            members = ([comp] if comp.has_mesh else []) + merge_members[cid]
+            meshed = bool(members) and _author_merged_mesh(
+                stage, prim_path, members, export, enclosing_frame=frame_of[cid])
+        else:
+            meshed = comp.has_mesh and _author_mesh(
+                stage, prim_path, comp, export, enclosing_frame=frame_of[cid])
         if meshed:
             n_meshes += 1
+            if members is not None:
+                n_merged += len(members)
         else:
             UsdGeom.Xform.Define(stage, prim_path)
         prim = stage.GetPrimAtPath(prim_path)
@@ -506,7 +633,17 @@ def _author_components(stage, assembly, included: set, top_path: Sdf.Path,
             _set_transform_op(prim, rel)
         # Traceability back to the source component id (survives round-trips).
         prim.SetCustomDataByKey("cellsmith:component_id", cid)
+        if meshed and members is not None:
+            # A merged prim answers for many components — record which, so the
+            # export stays traceable back to the tree it came from.
+            prim.SetCustomDataByKey(
+                "cellsmith:merged_component_ids",
+                Vt.StringArray([c.component_id for c in members]))
+            prim.SetCustomDataByKey("cellsmith:merged_count", len(members))
     _author_joints(stage, top_path, path_of, frame_of, joints, scale, export)
+    if simplify_groups:
+        log.info("Simplify Bodies: %d mark(s) merged %d components into %d mesh "
+                 "prim(s)", len(simplify_groups), n_merged, len(simplify_groups))
     return n_meshes
 
 
@@ -518,6 +655,7 @@ def write_model_usd(
     meters_per_unit: float = 1.0,
     origin_frame_cids=None,
     joints=None,
+    simplify_cids=None,
 ) -> int:
     """Write a WHOLE model (all free roots) to ``out_path``. Returns mesh count.
 
@@ -535,7 +673,8 @@ def write_model_usd(
             assembly, roots[0].component_id, out_path, suppressed=suppressed,
             up_direction="+Z", z_rotation_deg=0, scale=scale,
             meters_per_unit=meters_per_unit,
-            origin_frame_cids=origin_frame_cids, joints=joints)
+            origin_frame_cids=origin_frame_cids, joints=joints,
+            simplify_cids=simplify_cids)
 
     suppressed = set(suppressed or ())
     excluded: set = set()
@@ -554,7 +693,7 @@ def write_model_usd(
     n_meshes = _author_components(
         stage, assembly, included, top_path,
         {r.component_id for r in roots}, export, scale,
-        set(origin_frame_cids or ()) & included, joints)
+        set(origin_frame_cids or ()) & included, joints, simplify_cids)
     if n_meshes == 0:
         stage.GetRootLayer().Save()
         raise RuntimeError("No meshed geometry in this model — run “Show 3D” first.")

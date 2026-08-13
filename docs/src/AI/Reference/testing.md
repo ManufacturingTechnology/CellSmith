@@ -82,6 +82,15 @@ guards were **mutation-verified** — each was shown to fail when the defect it 
 reintroduced into a scratch copy of the tree. The origin story is in
 [packaging.md](packaging.md) → *Version reading is a SHARED SCRIPT*.
 
+`tests/test_ci_release_parity.py` (**tier-1**, added `CS-160`) keeps the PR gate and the
+release build from drifting: both workflows must delegate their `build-*` jobs to the same
+composite action, `ci.yml`'s step list must be a **prefix** of `release.yml`'s, release's
+extra steps must be publishing only (collect/upload), neither workflow may inline
+`make build` / `build.bat` / `PyInstaller` / `verify-payload.sh`, and the action must
+actually build, verify and assert its artifacts. Also mutation-verified. Rationale:
+ADR-0009 — the two costliest defects of the 2026-08-04 release push were both in the half
+the gate used to skip.
+
 !!! note "One test deliberately depends on the docstring existing"
 
     `test_the_docstring_does_not_leak_into_an_anchored_parse` asserts

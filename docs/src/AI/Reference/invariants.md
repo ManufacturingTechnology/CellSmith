@@ -41,6 +41,21 @@ Correctness-critical rules that span subsystems. Terse by design; each points to
   reaches the user (`assets_build.WARN_PREFIX` → `main_window._report_build_warnings`).
   Single-model FAST rebuilds stay STRICT and raise. → `geometry-edits.md`,
   `decisions.md` (ADR-0007).
+- **⭐ ONE derivation of "which components own a live frame".**
+  `model/live_frames.live_frames_and_joints` is it — the USD writer authors live
+  Xforms + `UsdPhysics` from it, and the OBJ CLI and the GUI use the SAME set to
+  judge Simplify-Bodies marks. A second derivation would let a mark pass the
+  click-time dialog and then hard-fail the export, or be fatal for USD but silently
+  fine for OBJ. It lives in the MODEL layer (not `src/export/`) precisely because
+  `src/gui/` must not import `src/export/`. → `geometry-edits.md`, `export.md`.
+- **⭐ A merged (Simplify Bodies) mesh may never swallow a prim something else
+  addresses.** A merge is one prim with one transform, so a live frame or a joint
+  body inside it would be destroyed — `UsdPhysics` binds to exact paths, and a
+  frame'd subtree's points are authored relative to it. Checked against **STRICT
+  descendants only**: the marked node's own frame survives as the merged prim's
+  `xformOp`, which is what makes "mark the link that IS Body1" work. Refused at
+  mark time AND fatal at export time, because a joint can be added later.
+  → `export.md`, `decisions.md` (ADR-0010).
 - **⭐ An Edit-Bodies recipe is bound to the exact SET OF SOLIDS it was authored on**
   (`i0..iN` = preorder indices + an `initial_count` fingerprint). Any change to what sits
   under the target invalidates it, and a count-PRESERVING change would silently re-map

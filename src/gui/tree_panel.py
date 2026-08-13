@@ -40,6 +40,9 @@ ORIGIN_FRAME_ROLE = Qt.ItemDataRole.UserRole + 9
 JOINT_ROLE = Qt.ItemDataRole.UserRole + 10
 #: True on a node with a component TRANSFORM (moved placement) — green move-cross.
 TRANSFORM_ROLE = Qt.ItemDataRole.UserRole + 11
+#: True on a node marked "Simplify Bodies" — its subtree exports as ONE merged
+#: mesh (generated models only) — cyan stacked BARS.
+SIMPLIFY_ROLE = Qt.ItemDataRole.UserRole + 12
 
 _FALLBACK_BRUSH = QBrush(QColor(180, 140, 60))  # amber tint for synthesised names
 _SUPPRESS_COLOR = QColor(210, 40, 40)  # red = suppressed (excluded from export)
@@ -55,6 +58,9 @@ _ASSET_COLOR = QColor(30, 90, 220)     # blue DOT = marked as Asset (deeper than
 _JOINT_COLOR = QColor(230, 185, 35)    # gold HEXAGON = has a prismatic/revolute joint
                                        # (unique hue+shape; distinct from the orange diamond)
 _TRANSFORM_COLOR = QColor(60, 170, 90)  # green MOVE-CROSS = has a component transform
+_SIMPLIFY_COLOR = QColor(0, 130, 190)  # cyan BARS = Simplify Bodies (subtree exports
+                                       # as one merged mesh); stacked bars read as
+                                       # "collapsed", unlike every other glyph shape
 
 #: TEMPORARY: show the implied top-level assembly root as a tree row (so the user can
 #: right-click it and export the WHOLE scene as one subtree). The default/intended
@@ -86,10 +92,11 @@ class _IndicatorDelegate(QStyledItemDelegate):
         has_frame = bool(index.data(ORIGIN_FRAME_ROLE))
         has_joint = bool(index.data(JOINT_ROLE))
         has_xform = bool(index.data(TRANSFORM_ROLE))
+        simplify = bool(index.data(SIMPLIFY_ROLE))
         modified_desc = bool(index.data(MODIFIED_DESC_ROLE))
         if not (suppressed or hidden or overridden or recolored or is_asset
                 or is_split or has_frame or has_joint or has_xform
-                or modified_desc):
+                or simplify or modified_desc):
             return
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -155,6 +162,20 @@ class _IndicatorDelegate(QStyledItemDelegate):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawLine(QPoint(cx, cy - d // 2), QPoint(cx, cy + d // 2))
             painter.drawLine(QPoint(cx - d // 2, cy), QPoint(cx + d // 2, cy))
+            painter.setPen(Qt.PenStyle.NoPen)
+            cx -= d + 4
+        if simplify:
+            # Cyan stacked BARS = this subtree exports as ONE merged mesh. Three
+            # short horizontals read as "collapsed into one" and share no shape
+            # with the dot/square/diamond/triangle/hexagon/cross set above.
+            # d // 2 - 1 (=3 at d=8), NOT d // 3 (=2): at 2px apart a 1.4px pen
+            # merges the three bars into one blob (probe-verified).
+            painter.setPen(QPen(_SIMPLIFY_COLOR, 1.4))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            gap = max(2, d // 2 - 1)
+            for dy in (-gap, 0, gap):
+                painter.drawLine(QPoint(cx - d // 2, cy + dy),
+                                 QPoint(cx + d // 2, cy + dy))
             painter.setPen(Qt.PenStyle.NoPen)
             cx -= d + 4
         if modified_desc:
@@ -288,6 +309,12 @@ class TreePanel(QTreeView):
         item = self._items_by_id.get(component_id)
         if item is not None:
             item.setData(bool(is_asset), ASSET_ROLE)
+
+    def set_simplify(self, component_id: str, simplify: bool) -> None:
+        """Toggle the cyan Simplify-Bodies marker (stacked bars) on a node."""
+        item = self._items_by_id.get(component_id)
+        if item is not None:
+            item.setData(bool(simplify), SIMPLIFY_ROLE)
 
     def set_modified_descendants(self, component_ids) -> None:
         """Set the FULL set of nodes that should show the caret (modified below).

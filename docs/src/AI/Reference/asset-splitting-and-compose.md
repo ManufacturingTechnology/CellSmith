@@ -189,7 +189,12 @@ exports).
       named by slug:
     - **`{slug}_base.usd`** = the full authored export (`usd_writer.
       write_model_usd` — single root → the existing subtree body; multi-root
-      Static → synthetic `/Root` Xform). **OVERWRITTEN every export.**
+      Static → synthetic `/Root` Xform). **OVERWRITTEN every export.** Each
+      model's own **Simplify Bodies** marks apply here (`load_one` returns them
+      alongside `frames`/`joints`), so a merge multiplies across every occurrence
+      that payloads the asset — see `export.md` § *Simplify Bodies*. `load_one`
+      also VALIDATES them before anything is written, so a stale mark fails the
+      build naming its model rather than part-way through authoring.
     - **`{slug}.usda`** = a thin **OVERRIDE wrapper** whose single default prim
       **references** `./{slug}_base.usd` (`write_override_wrapper`; the old name
       `write_asset_override_wrapper` is kept as an alias — the helper now serves the

@@ -77,11 +77,27 @@ Per-node state (hidden / suppressed / color-override) and its asset-occurrence p
   nearest visible face's BASE color (`_color_at`, the recolor SOURCE) and fires
   `on_pick_color` → `_on_pick_color` exits the mode and opens Global Recolor focused
   on that color.
+- **Simplify Bodies** (cyan stacked bars ≡): this node's whole subtree exports as
+  ONE merged mesh. **GENERATED models only** (assets + Static) — the exact mirror
+  of the `is_asset` gate, which is Source-only. `NodeConfig.simplify_bodies`,
+  `MainWindow._simplify_nodes` / `_set_simplify_nodes`, `tree.set_simplify`.
+  Export-only: the bake, the viewport and the STEP path are untouched, so it
+  needs no `_confirm_edit_clears_assets`. Two explicit menu entries ("Mark
+  Simplify Bodies" / "Clear Mark Simplify Bodies") rather than one toggling
+  label, so a mixed multi-selection is unambiguous. It can be REFUSED — full
+  semantics + the strict-validation rule in `export.md` § *Simplify Bodies*.
 - Indicator glyphs are painted at the RIGHT of the row by `tree_panel._IndicatorDelegate`,
   from the right edge inward: red dot = suppressed, gray dot = hidden, purple dot =
-  own color override, purple square = affected by a global recolor rule, then a blue
+  own color override, purple square = affected by a global recolor rule, blue dot =
+  asset, orange diamond = split recipe, teal triangle = custom origin, gold hexagon =
+  joint, green move-cross = component transform, **cyan stacked bars = Simplify
+  Bodies**, then a blue
   **caret (^)** on any node with a modified DESCENDANT (hidden/suppressed/color) so a
-  collapsed parent signals edits below. Caret set =
+  collapsed parent signals edits below. Roles are `UserRole + 1..12`
+  (`SIMPLIFY_ROLE` = 12, next free is 13); **a new role must be added to the
+  early-out at the top of `paint()` or nothing draws**. The bars are spaced
+  `d // 2 - 1` apart, NOT `d // 3` — at 2 px a 1.4 px pen merges them into a blob
+  (probe-verified, `scratchpad/simplify_obj_gui_probe.py`). Caret set =
   strict ancestors of every non-default `NodeConfig`, via
   `MainWindow._modified_descendant_ancestors()` → `tree.set_modified_descendants(set)`
   on load + after each edit.

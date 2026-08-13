@@ -1,14 +1,18 @@
 name: CI
 
 # Pre-merge build check. Runs on PRs into the protected staging/release branches so
-# a PR can't merge unless CellSmith still freezes into a usable payload on both
-# shipped platforms. Mark `build-linux`, `build-windows`, `test-linux`,
-# `test-windows` and (on release/* branches) `version-check` as required status
-# checks (see CONTRIBUTING.md → Branch protection rules).
+# a PR can't merge unless CellSmith still builds into a usable, fully packaged
+# release on both shipped platforms. Mark `build-linux`, `build-windows`,
+# `test-linux`, `test-windows` and `version-check` as required status checks
+# (see CONTRIBUTING.md → Branch protection rules).
 #
-# DELIBERATELY NOT PACKAGED HERE: no .zip, no installer, no .deb, no artifact
-# upload. Those add ~15 minutes and only the release workflow needs them. What this
-# gate does instead is assert the frozen payload is USABLE — see the verify steps.
+# ⭐ THIS GATE RUNS THE FULL RELEASE BUILD (ADR-0009, changed 2026-08-04). It used
+# to skip the packaging — no .zip, no installer, no .deb — because that saved ~15
+# minutes. Both of the costliest defects of the first release push were in exactly
+# that skipped half. The build now lives in ONE composite action per OS, shared
+# verbatim with release.yml; only artifact upload and tagging are release-only.
+# Do not "optimize" this back into a cheaper build — see the ADR for the escape
+# hatch that is acceptable (a paths-filter or label gate for docs-only PRs).
 on:
   pull_request:
     branches: [main, 'dev/*', 'release/*']
@@ -27,28 +31,30 @@ env:
 
 jobs:
   version-check:
-    # Pre-merge guard for release PRs: a PR into release/X.Y must carry a matching
-    # X.Y version, so the post-merge release workflow can't fail on a
-    # version/branch mismatch. No-op for PRs into main / dev/*.
+    # Two guards, deliberately at different scopes:
+    #   ALWAYS      — `__version__` parses and is semver. This is the check that
+    #                 actually fired in anger, and it is not release-specific: a
+    #                 malformed version breaks `make build`, the .deb version, and
+    #                 the tag. Running it only for release PRs meant the defect
+    #                 could sit on main until the release build hit it.
+    #   RELEASE PRs — the X.Y line matches the target branch, so the post-merge
+    #                 release workflow can't fail on a version/branch mismatch.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Validate __version__ matches the target release branch
+      - name: Validate __version__ (and, for release PRs, that it matches the branch)
         run: |
-          base="${{ github.base_ref }}"
-          if [[ ! "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Base branch '$base' is not a release branch; skipping version check."
-            exit 0
-          fi
-
           # Reads + semver-validates in one place, shared with release.yml. Do NOT
           # inline a parse here: the two inlined copies this replaced were both
           # unanchored and matched the module docstring. See the script's header.
           version=$(bash .github/scripts/read-version.sh) || exit 1
+          echo "OK: __version__ '$version' is well-formed."
 
-          # Re-match the base branch (the regex test above clobbered BASH_REMATCH)
-          # to recover the expected X.Y line, then compare to the version's line.
-          [[ "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]
+          base="${{ github.base_ref }}"
+          if [[ ! "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Base branch '$base' is not a release branch; skipping the branch-match check."
+            exit 0
+          fi
           expected_minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
           actual_minor=$(echo "$version" | cut -d'-' -f1 | cut -d. -f1-2)
           if [ "$expected_minor" != "$actual_minor" ]; then
@@ -62,7 +68,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        shell: bash -el {0}          # -l so conda's shell hook is active
+        # -l so conda's shell hook is active. ⛔ A step running under a LOGIN
+        # shell must never call the `exit` builtin: bash then sources
+        # ~/.bash_logout, and the status of ITS last command replaces yours —
+        # `exit 0` becomes exit 1 on an Ubuntu runner. This cost a CI round-trip
+        # once already (see .github/actions/build-linux/action.yml). Let the
+        # script fall off its end, or give the step `shell: bash`.
+        # Enforced by tests/test_workflow_shell_hygiene.py.
+        shell: bash -el {0}
     steps:
       - uses: actions/checkout@v7
       - name: Install the system libraries offscreen rendering needs
@@ -117,6 +130,14 @@ jobs:
         # beside python.exe; see status.md.
         run: pytest -m "not local_only and not gl" -q
 
+  # ⭐ THE GATE RUNS THE RELEASE BUILD, NOT A CHEAPER APPROXIMATION OF IT.
+  # Both jobs below are the SAME composite actions release.yml uses, so every
+  # packaging step — tar.gz, .deb, zip, Inno installer, the artifact assertions —
+  # is exercised on the feature→main PR. It used to be PyInstaller-only here
+  # ("~15 min shorter"), and the two defects that cost the most to find were both
+  # in the half the gate skipped: make_deb.sh's SIGPIPE on the first real payload,
+  # and a version guard that had never worked. A step the gate does not run is a
+  # step nobody has tested. Cost: the gate is ~15 min longer. See ADR-0009.
   build-linux:
     runs-on: ubuntu-latest
     defaults:
@@ -124,36 +145,7 @@ jobs:
         shell: bash -el {0}
     steps:
       - uses: actions/checkout@v7
-      - name: Report free disk space
-        # The conda env plus build/ plus dist/ is several GB on a runner with
-        # ~20-29 GB free. Printed so a future "no space left" failure is obvious.
-        run: df -h /
-      - name: Install the system libraries PySide6/VTK/OCC link against
-        # ⭐ INSTALL BEFORE BUILDING. PyInstaller's Qt hook IMPORTS PySide6 at
-        # build time to locate the Qt plugin dirs; if that import fails the hook
-        # silently collects NO plugins and produces a dist whose workers all pass
-        # but whose GUI dies with "no Qt platform plugin could be initialized".
-        # The verify step below checks for exactly that fingerprint.
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            libxcb1 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
-            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xfixes0 \
-            libxcb-xkb1 libxkbcommon-x11-0 libgl1 libegl1 libfontconfig1 \
-            libdbus-1-3 libxrender1 libxext6 libsm6 libice6 libglib2.0-0t64 \
-            libwayland-client0 libwayland-cursor0 libwayland-egl1 libx11-xcb1 \
-            libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxcursor1 libxi6 \
-            libxinerama1
-      - uses: conda-incubator/setup-miniconda@v4
-        with:
-          environment-file: packaging/environment.yml
-          activate-environment: CellSmithEnv
-          auto-activate: false        # `auto-activate-base` is deprecated
-          conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
-      - name: Freeze (PyInstaller only — no packaging on the PR gate)
-        run: python -m PyInstaller packaging/cellsmith.spec --clean --noconfirm
-      - name: Verify the payload is usable
-        run: bash .github/scripts/verify-payload.sh dist/CellSmith CellSmith
+      - uses: ./.github/actions/build-linux
 
   build-windows:
     runs-on: windows-latest
@@ -162,16 +154,4 @@ jobs:
         shell: bash -el {0}
     steps:
       - uses: actions/checkout@v7
-      - name: Report free disk space
-        shell: pwsh
-        run: Get-PSDrive C | Format-List Used, Free
-      - uses: conda-incubator/setup-miniconda@v4
-        with:
-          environment-file: packaging/environment.yml
-          activate-environment: CellSmithEnv
-          auto-activate: false        # `auto-activate-base` is deprecated
-          conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
-      - name: Freeze (PyInstaller only — no zip, no installer on the PR gate)
-        run: python -m PyInstaller packaging/cellsmith.spec --clean --noconfirm
-      - name: Verify the payload is usable
-        run: bash .github/scripts/verify-payload.sh dist/CellSmith CellSmith.exe
+      - uses: ./.github/actions/build-windows

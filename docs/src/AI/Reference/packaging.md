@@ -14,7 +14,105 @@ version-driven trigger, rulesets) is documented for humans in the repo-root
 |---|---|---|
 | Trigger | `pull_request` → `main`, `dev/*`, `release/*` | push to `release/*` touching `src/__version__.py`; plus `workflow_dispatch` |
 | Jobs | `version-check`, `test-linux`, `test-windows`, `build-linux`, `build-windows` | `version`, `build-linux`, `build-windows`, `release` |
-| Packaging | **none** — PyInstaller only, then `verify-payload.sh`. Skipping the zip/installer/`.deb` keeps the gate ~15 min shorter. | full: zip + installer (Windows), tar.gz + `.deb` (Linux) |
+| Packaging | **identical to release** — both `build-*` jobs are the same composite action (see below) | same composite action, **plus** collect + upload |
+
+### ⭐ The PR gate runs the RELEASE build — one composite action per OS (ADR-0009)
+
+`.github/actions/build-{linux,windows}/action.yml` hold the entire build — free
+space, system libs, conda env, `make build` / `build.bat ci`, `verify-payload.sh`,
+and an assertion that the artifacts exist. **Both workflows `uses:` them**; only
+publishing (collect, upload, tag) is release-specific.
+
+This reverses an earlier trade — the gate used to run PyInstaller only, "~15 min
+shorter" — because the two costliest defects of the 2026-08-04 release push were
+*both* in the half the gate skipped: `make_deb.sh`'s SIGPIPE (only reproducible on a
+real payload) and a version guard that had never worked (in two inlined copies).
+**A step the gate does not run is a step nobody has tested**, and duplicated steps
+drift. `tests/test_ci_release_parity.py` enforces it: same composite action in both
+workflows, no inline `make build` / `build.bat` / `PyInstaller` / `verify-payload.sh`
+in either, and nothing in release's build job that the gate does not also run.
+
+Also early-surfacing, same push: `version-check` now validates that `__version__`
+parses and is semver on **every** PR (the branch-match half still only applies to
+`release/X.Y` bases) — a malformed version breaks `make build`, the `.deb` version
+and the tag, none of which is release-branch-specific.
+
+⚠️ **Cost:** the gate is ~15 min longer per PR. If that becomes intolerable, the
+escape hatch is a `paths`-filter or a label-gated job — **not** a cheaper build,
+which is the thing that failed.
+
+!!! danger "⭐ NEVER call `exit` from a step whose shell is `bash -el {0}` — `~/.bash_logout` overwrites the exit status"
+
+    **This is the cause of the `build-linux` failure of 2026-08-04**, where
+    `Assert both Linux artifacts were produced` printed both of its `ok` lines,
+    computed `rc=0`, ran `exit 0`, and the runner still reported *"Process
+    completed with exit code 1"*. It was recorded here as **root cause unknown**;
+    it is now proven, and it is not specific to that step.
+
+    [bash(1), INVOCATION](https://www.gnu.org/software/bash/manual/html_node/Bash-Startup-Files.html)
+    (verified locally against `/usr/share/man/man1/bash.1.gz`, line 347):
+
+    > When an interactive login shell exits, **or a non-interactive login shell
+    > executes the `exit` builtin command**, bash reads and executes commands from
+    > the file `~/.bash_logout`, if it exists.
+
+    `bash -el {0}` is a non-interactive **login** shell — that `-l` is what
+    activates `CellSmithEnv`. So any step that calls `exit` sources
+    `~/.bash_logout`, and **the status of that file's last command becomes the
+    step's status**. On an Ubuntu runner `/home/runner/.bash_logout` is the
+    `/etc/skel` default, ending in
+
+    ```bash
+    if [ "$SHLVL" = 1 ]; then
+        [ -x /usr/bin/clear_console ] && /usr/bin/clear_console -q
+    fi
+    ```
+
+    `SHLVL` is `1` (the runner spawns bash from a non-shell parent, so bash sets it
+    itself) and no terminal is attached, so `clear_console -q` exits 1 — and so does
+    the step, however it ended.
+
+    **Probe** (2026-08-13, Debian/WSL, bash 5.2.37, `SHLVL` unset in the parent,
+    skel `~/.bash_logout` in `HOME`):
+
+    | Step shell | Script | Step exit |
+    |---|---|---|
+    | `bash -el {0}` | `exit 0` | **1** ← the CI failure, reproduced |
+    | `bash -el {0}` | falls off the end | 0 ← why every *other* `-el` step passes |
+    | `bash --noprofile --norc -eo pipefail {0}` | `exit 0` | 0 ← the fix |
+    | `bash -el {0}` | `exit 1` | 1 (a real failure still fails) |
+    | `bash -el {0}`, **no** `~/.bash_logout` | `exit 0` | 0 ← why it "could not be reproduced" |
+
+    The two variables that decide it — the runner's `~/.bash_logout` and `SHLVL` —
+    are both **outside the script**, which is why reading the script harder was
+    never going to find it.
+
+    **The rule:** a login-shell step must not call `exit`. Let the script fall off
+    its end (the shell's status is then its last command's, and `~/.bash_logout` is
+    never read), move the deciding logic into a called script (`bash foo.sh` is a
+    child, non-login shell — its `exit` is unaffected, which is why
+    `verify-payload.sh` was never hit by this), or drop the login shell. Both
+    `Assert … artifacts were produced` steps take the last option: globbing and
+    stat'ing files needs no conda env, so they are pinned to plain `shell: bash`
+    (= `bash --noprofile --norc -eo pipefail {0}`).
+
+    **Enforced by `tests/test_workflow_shell_hygiene.py`** across both workflows and
+    both composite actions, including the job-level `defaults.run.shell` inheritance
+    that makes the trap easy to walk into. Its negative control runs the detector
+    against the pre-fix `action.yml` at `7d95a40` and requires it to flag exactly
+    that step.
+
+    The steps still print `verdict: rc=N` before exiting. That is now belt-and-braces
+    rather than the only diagnostic: `verdict: rc=0` beside a red step would mean the
+    wrapper, not the script.
+
+    ⚠️ Their glob loop writes `if [ -e "$f" ]; then hit="$f"; fi`, never
+    `[ -e "$f" ] && hit="$f"` — under `-e` the no-match path would abort the script
+    instead of reporting the missing artifact. Same trap as the `.deb` self-checks.
+    Behaviour re-verified 2026-08-13 by extracting both steps' scripts from the YAML
+    and running them in WSL under GitHub's exact `shell: bash` against a fake `dist/`
+    (including the `~` in the `.deb` name): both-present → 0, either missing → 1,
+    nothing built → 1, for both actions.
 
 **CellSmith-specific adaptations** (none of these apply to MTConnectExplorer, which is a
 pip-venv onefile build):
@@ -285,10 +383,29 @@ worker subprocesses; onefile would re-extract the ~1.4 GB payload per launch.
   - **Templating uses Python, not `sed`.** The `Depends` list contains `|` and the
     maintainer contains `<`/`>`/`@`, so every plausible sed delimiter appears in some
     value — the first version died with ``unknown option to `s'``.
-  - The script ends with **9 self-checks** (archive readable, launcher, symlink, desktop
-    entry, icon, copyright, notices, Qt plugins present, no bare `-` in the version) and
-    runs `lintian` informationally when available. Verified end-to-end in a WSL Debian
-    sandbox against a synthetic payload.
+  - The script ends with **10 self-checks** (archive readable, launcher, symlink, desktop
+    entry, icon, copyright, notices, Qt plugins present, **no GPL readline**, no bare `-`
+    in the version) and runs `lintian` informationally when available. The readline check
+    is there because the payload verifier only ever sees `dist/CellSmith` — the `.deb` is
+    a separate distribution and needs its own assertion.
+  - ⛔ **TWO TRAPS in that self-check block; both fired only on a REAL payload.**
+    1. **SIGPIPE.** The checks were `printf '%s\n' "$contents" | grep -q PAT`. `grep -q`
+       exits at the first match and closes the pipe; the real listing is ~200 kB, well
+       past the 64 kB pipe buffer, so `printf` was still writing and died —
+       `printf: write error: Broken pipe`, and `make build` failed *after* successfully
+       building the `.deb`. ⭐ Note the shape: **it fires only when the check SUCCEEDS**
+       (an early match is what closes the pipe) and only when the listing is big enough
+       to block — which is exactly why it passed against a small synthetic payload in the
+       WSL sandbox and failed on the 2111-file build. Fix: `dpkg-deb --contents` to a
+       file once, then `grep -q` the FILE. No pipe, no SIGPIPE.
+    2. **`set -e` made `check()` unreachable.** With `-e`, a bare `cmd; check $?` aborts
+       the moment `cmd` fails, so `fail`, the `FAIL` lines and the "self-checks failed"
+       summary were all dead code — any failing check surfaced as a bare
+       `make: *** Error 1` with no indication of *which*. Every check is now written so
+       its own failure is TESTED (`if/then/else` via the `has()` helper). Re-verified in
+       WSL against a synthetic payload padded to 2200 files: the old form exits **141**
+       (SIGPIPE) before printing anything; the new form prints `FAIL <name>`, keeps
+       running the remaining checks, and exits 1 with the summary.
 - ⭐ **Payload verifier** (`.github/scripts/verify-payload.sh <dir> <launcher>`), shared by
   both workflows so the PR gate and the shipped artifact are held to the same standard.
   Asserts the payload is *usable*, not merely present: Qt plugins collected, a Qt
@@ -314,7 +431,27 @@ worker subprocesses; onefile would re-extract the ~1.4 GB payload per launch.
         | Run | Hits | Route |
         |---|---|---|
         | 1 | 3 — incl. `readline.cpython-312-…so` | **`a.binaries`.** Binary dependency analysis collected the `readline` **extension module**, which is what drags `libreadline` in via **`DT_NEEDED`**. (On a stock Debian layout it is the *only* consumer of `libreadline` — probed with `readelf -d` over `/usr/lib/x86_64-linux-gnu` + `lib-dynload`.) |
-        | 2 | 4 — `lib{readline,history}.so{,.8}`, **zero** reverse deps | **`a.datas`, and it is PyInstaller's OWN numpy hook.** `PyInstaller/hooks/hook-numpy.py` does `if numpy_installer == 'conda': datas += conda_support.collect_dynamic_libs("numpy", dependencies=True)`. `dependencies=True` walks numpy's conda dependency **graph** (numpy → python → readline) and `conda.collect_dynamic_libs` **globs `*.so`/`*.so.*` out of the env's shared `lib/`**, symlinks included (`resolved_file.is_file()` follows them) — hence all four files, and hence nothing NEEDs them. Swept, not linked. |
+        | 2 | 4 — `lib{readline,history}.so{,.8}`, **zero** reverse deps | **`a.datas`.** Nothing in the payload NEEDs them, so they were *swept* out of the conda env's shared `lib/`, not linked. Origin: PyInstaller's OWN numpy hook — `PyInstaller/hooks/hook-numpy.py` does `if numpy_installer == 'conda': datas += conda_support.collect_dynamic_libs("numpy", dependencies=True)`; `dependencies=True` walks numpy's conda dependency **graph** (numpy → python → readline) and `conda.collect_dynamic_libs` globs `*.so`/`*.so.*` out of `lib_dir`. |
+
+        ⭐ **What run 3 corrected.** With the filter printing every entry it drops, the
+        build log showed the two lists split the files by KIND, not by origin:
+
+        ```text
+        dropped from a.binaries: ('libhistory.so.8.3',  '…/envs/CellSmithEnv/lib/libhistory.so.8.3',  'BINARY')
+        dropped from a.binaries: ('libreadline.so.8.3', '…/envs/CellSmithEnv/lib/libreadline.so.8.3', 'BINARY')
+        dropped from a.datas:    ('libreadline.so.8',   'libreadline.so.8.3',  'SYMLINK')
+        dropped from a.datas:    ('libhistory.so.8',    'libhistory.so.8.3',   'SYMLINK')
+        dropped from a.datas:    ('libhistory.so',      'libhistory.so.8.3',   'SYMLINK')
+        dropped from a.datas:    ('libreadline.so',     'libreadline.so.8.3',  'SYMLINK')
+        ```
+
+        The **real files** end up in `a.binaries` as `BINARY` — the hook files them under
+        `datas`, then PyInstaller's *"Performing binary vs. data reclassification"* pass
+        (visible in the same log) moves anything that is actually a shared library into
+        `binaries`. The **symlinks** stay in `a.datas` with typecode `SYMLINK`, where
+        `src` is the link target rather than a path. So filtering both lists was
+        necessary for a reason neither run alone revealed, and dest-basename matching is
+        the right predicate because it is the one field both kinds share.
 
       So the spec filters **both lists** (dest basename starting `readline` /
       `libreadline` / `libhistory`), printing the full `(dest, src, typecode)` of every

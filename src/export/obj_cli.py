@@ -63,10 +63,23 @@ def main(argv: list[str]) -> int:
         if comp is not None:
             comp.color = rgb
 
+    # "Simplify Bodies" marks. OBJ authors no frames or joints, so it cannot judge
+    # a mark itself — reconstruct the same live-frame/joint sets the USD export
+    # uses and validate against those, so one mark means one thing in every format.
+    from ..model.live_frames import joint_body_cids, live_frames_and_joints
+    from ..model.simplify_marks import require_valid_marks
+
+    simplify_cids = cfg.simplify_ids()
+    if simplify_cids:
+        frame_cids, joints = live_frames_and_joints(store, model, step_path, asm, log)
+        require_valid_marks(asm, simplify_cids & set(asm.descendants(root_id)),
+                            frame_cids, joint_body_cids(joints))
+
     n = write_subtree_obj(
         asm, root_id, out_path, suppressed=suppressed,
         up_direction="+Z", z_rotation_deg=0,
         scale=cfg.global_settings.export_scale,
+        simplify_cids=simplify_cids,
         origin=_export_origin(origin_mode, asm.get(root_id)),
     )
     print(f"exported {n} meshes to {out_path}", flush=True)

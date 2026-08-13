@@ -2,7 +2,8 @@
 
 The .obj counterpart of the USD/STEP subtree export: one ``o <name>`` group per
 meshed leaf (tessellated triangles), per-part colors via a sibling ``.mtl``
-(``Kd``), suppressed subtrees excluded. Geometry + colors only.
+(``Kd``), suppressed subtrees excluded. Geometry + colors only. A node marked
+"Simplify Bodies" collapses its whole subtree into ONE ``o`` group.
 
 Like the USD writer, the export transform (orientation + unit scale + optional
 local-origin shift) is BAKED into the vertices — OBJ carries no unit or up-axis
@@ -21,6 +22,7 @@ from typing import Optional
 import numpy as np
 
 from ..model.orientation import export_transform
+from ..model.simplify_marks import resolve_simplify_groups
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ def write_subtree_obj(
     up_direction: str = "+Z",
     z_rotation_deg: int = 0,
     scale: float = 0.001,
+    simplify_cids=None,
     origin=None,
 ) -> int:
     """Write the meshed subtree at ``root_id`` to ``out_path`` (+ sibling .mtl).
@@ -75,6 +78,12 @@ def write_subtree_obj(
     ``scale`` (source mm → OBJ units, default → meters), the orientation, and the
     ``origin`` shift (source-coord 3-vector or None) are baked into the vertices.
     Returns the number of meshes written.
+
+    ``simplify_cids``: nodes marked "Simplify Bodies" — each one's subtree becomes
+    a single ``o`` group instead of one per leaf. Callers must have already run
+    :func:`~src.model.simplify_marks.require_valid_marks` (OBJ has no live frames
+    or joints of its own, so it cannot judge a mark; the CLIs, which do hold those
+    sets, validate so a mark means the same thing in every format).
     """
     root = assembly.get(root_id)
     if root is None:
@@ -95,7 +104,7 @@ def write_subtree_obj(
         fh.write("mtllib %s\n" % os.path.basename(mtl_path))
         n_meshes, vert_offset = _write_components(
             fh, assembly, included, export, "", materials, mtl_chunks,
-            vert_offset)
+            vert_offset, simplify_cids)
 
     if n_meshes == 0:
         raise RuntimeError("No meshed geometry in this subtree — run “Show 3D” first.")
@@ -108,15 +117,24 @@ def write_subtree_obj(
 
 def _write_components(fh, assembly, included: set, place4, prefix: str,
                       materials: dict, mtl_chunks: list,
-                      vert_offset: int) -> tuple:
+                      vert_offset: int, simplify_cids=None) -> tuple:
     """Write every included, meshed component with ``place4`` baked into the
     vertices; ``o``-group names get ``prefix`` (composed exports use it to
     keep occurrence groups distinct). ``vert_offset``/``materials`` span the
     whole FILE (OBJ indices are global; materials dedupe across calls).
     Returns ``(n_meshes_written, new_vert_offset)``.
+
+    Under a "Simplify Bodies" mark the subtree's leaves are written as ONE ``o``
+    group named for the marked node. OBJ indices are already file-global, so this
+    changes only the grouping and the ``usemtl`` runs — never the geometry. Colors
+    still switch per leaf inside the group (an OBJ group may carry several
+    materials), so an OBJ merge is color-lossless just like the USD one.
     """
     n_meshes = 0
     used_names: set = set()
+    groups = resolve_simplify_groups(assembly, set(simplify_cids or ()), included)
+    owner_of = {m: mark for mark, members in groups.items() for m in members}
+    emitted_groups: set = set()   # marks whose single ``o`` header is already out
     for comp in assembly.components:  # walk order
         # ``has_mesh`` covers STEP (shape + verts) AND mesh (verts, shape=None)
         # leaves; gating on ``shape`` would drop every mesh leaf.
@@ -132,13 +150,22 @@ def _write_components(fh, assembly, included: set, place4, prefix: str,
             continue
         tris = faces.reshape(-1, 4)[:, 1:] + 1 + vert_offset  # OBJ is 1-indexed, global
 
-        gname = _obj_name(comp.name, comp.component_id)
-        base, i = gname, 1
-        while gname in used_names:  # duplicate sibling names stay distinct
-            i += 1
-            gname = f"{base}_{i}"
-        used_names.add(gname)
-        fh.write("o %s%s\n" % (prefix, gname))
+        cid = comp.component_id
+        owner = owner_of.get(cid, cid if cid in groups else None)
+        if owner is None or owner not in emitted_groups:
+            # One header per component normally; under a mark, ONE header for the
+            # whole subtree (keyed on the mark, not on walk contiguity).
+            named = comp if owner is None else assembly.get(owner)
+            gname = _obj_name(named.name, owner or cid)
+            base, i = gname, 1
+            while gname in used_names:  # duplicate sibling names stay distinct
+                i += 1
+                gname = f"{base}_{i}"
+            used_names.add(gname)
+            fh.write("o %s%s\n" % (prefix, gname))
+            n_meshes += 1
+            if owner is not None:
+                emitted_groups.add(owner)
         if comp.color is not None:
             key = tuple(round(float(c), 6) for c in comp.color)
             name = materials.get(key)
@@ -151,16 +178,16 @@ def _write_components(fh, assembly, included: set, place4, prefix: str,
         np.savetxt(fh, world, fmt="v %.6f %.6f %.6f")
         np.savetxt(fh, tris, fmt="f %d %d %d")
         vert_offset += world.shape[0]
-        n_meshes += 1
     return n_meshes, vert_offset
 
 
 def write_composed_obj(items, out_path: str, scene_name: str = "Scene") -> int:
     """Write a COMPOSED scene: ``items = [(assembly, group_prefix, place4,
-    included_cids)]`` — one item per asset OCCURRENCE (place4 = the meter-space
-    ``S·W_occ`` for that occurrence; Static passes plain ``S``). One global
-    vertex index + one deduped ``.mtl`` across every model. Returns the total
-    mesh count.
+    included_cids[, simplify_cids])]`` — one item per asset OCCURRENCE (place4 =
+    the meter-space ``S·W_occ`` for that occurrence; Static passes plain ``S``).
+    One global vertex index + one deduped ``.mtl`` across every model. Returns the
+    total mesh count. The optional 5th element carries that model's "Simplify
+    Bodies" marks (already validated by the caller).
     """
     mtl_path = os.path.splitext(out_path)[0] + ".mtl"
     materials: dict = {}
@@ -170,10 +197,12 @@ def write_composed_obj(items, out_path: str, scene_name: str = "Scene") -> int:
     with open(out_path, "w", encoding="utf-8") as fh:
         fh.write("# CellSmith composed OBJ export of %s\n" % scene_name)
         fh.write("mtllib %s\n" % os.path.basename(mtl_path))
-        for assembly, prefix, place4, included in items:
+        for item in items:
+            assembly, prefix, place4, included = item[:4]
+            simplify_cids = item[4] if len(item) > 4 else None
             n, vert_offset = _write_components(
                 fh, assembly, included, place4, prefix, materials,
-                mtl_chunks, vert_offset)
+                mtl_chunks, vert_offset, simplify_cids)
             n_meshes += n
     if n_meshes == 0:
         raise RuntimeError("No meshed geometry to compose.")
