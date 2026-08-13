@@ -79,13 +79,28 @@ Every published release flows through a staging branch (`main` for the next vers
 
 ### Triggering a release
 
-The workflow fires on **pushes to `release/*` branches that modify `src/__version__.py`**. The path
-    filter means non-version commits on a release branch (e.g. dependency bumps, doc fixes) do not
-    trigger a release.
+The workflow fires on **every push to a `release/*` branch**. What decides whether a release is
+    actually published is not which files the push touched, but whether the tag implied by
+    `__version__` already exists on the remote — if it does, the workflow skips itself in ~15
+    seconds with a `::notice::` and builds nothing.
+
+!!! warning "Changed 2026-08-13 — the trigger no longer has a `paths` filter"
+
+    It used to fire only on pushes that modified `src/__version__.py`. That made merging `main`
+        into `release/0.1` *without* a version bump a **completely silent no-op** — GitHub
+        evaluates a push's `paths` filter against a two-dot diff of the push's before/after SHAs,
+        so when both tips carried the same version the filter matched nothing, no run was queued,
+        and nothing was reported anywhere. A release that does not happen must not look identical
+        to one that was never requested.
+
+    ⚠️ **Consequence:** a push to a release branch whose version is **not yet tagged** will
+        publish, whatever files it touched. Doc fixes and dependency bumps are no longer
+        automatically release-free — land them on `main` (or after the release) rather than on a
+        release branch sitting at an unreleased version.
 
 ```mermaid
 flowchart LR
-    A["PR merge to release/0.1<br/>bumping __version__ to 0.1.1"] -->|push| B["release.yml<br/>workflow"]
+    A["PR merge to release/0.1<br/>(any push)"] -->|push| B["release.yml<br/>workflow"]
     B --> C{"Tag v0.1.1<br/>already exists?"}
     C -->|yes| Skip["Skip — already released"]
     C -->|no| D["build-linux + build-windows"]
@@ -101,6 +116,12 @@ Before building, the workflow validates two things:
 - **`__version__` is valid semver** (`MAJOR.MINOR.PATCH[-PRERELEASE]`).
 - **The branch name matches the version's `X.Y`** — `release/0.1` must hold a `0.1.x` version, not
     `0.2.x`. This catches the "merged the wrong PR into the wrong branch" mistake.
+
+The PR gate checks a third thing, **before** the merge: a PR into `release/X.Y` whose `__version__`
+    is **already tagged on the remote** is refused, because merging it could only produce a run
+    that skips itself. The fix is to bump `__version__` in the same PR. ⚠️ This means **syncing a
+    release branch with `main` without releasing is no longer a single merge** — bump the version,
+    or push the sync commits some other way.
 
 If the tag implied by `__version__` already exists on the remote, the workflow skips (preventing
     re-runs on a non-version commit, or on the same commit being pushed twice). To re-run a release
