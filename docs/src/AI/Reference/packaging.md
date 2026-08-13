@@ -12,9 +12,46 @@ version-driven trigger, rulesets) is documented for humans in the repo-root
 
 | | `ci.yml` (PR gate) | `release.yml` |
 |---|---|---|
-| Trigger | `pull_request` → `main`, `dev/*`, `release/*` | push to `release/*` touching `src/__version__.py`; plus `workflow_dispatch` |
+| Trigger | `pull_request` → `main`, `dev/*`, `release/*` | **every** push to `release/*` (no `paths` filter — see below); plus `workflow_dispatch` |
 | Jobs | `version-check`, `test-linux`, `test-windows`, `build-linux`, `build-windows` | `version`, `build-linux`, `build-windows`, `release` |
 | Packaging | **identical to release** — both `build-*` jobs are the same composite action (see below) | same composite action, **plus** collect + upload |
+
+### ⭐ The release trigger has NO `paths` filter — and that is deliberate (CS-163)
+
+`release.yml` fires on **every** push to `release/*`. It used to carry
+`paths: ['src/__version__.py']`, which made a merge into a release branch a **silent
+no-op** whenever the version had not changed: per
+[GitHub's workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onpushpull_requestpull_request_targetpathspaths-ignore),
+a push to an existing branch evaluates `paths` against a **two-dot diff of the push's
+before/after SHAs** — not "did any commit touch the file" — so with both tips carrying the
+same version it matched nothing, queued no run, and annotated nothing. That is how
+`v0.1.0-alpha.1` sat unreleased with a green PR history and no failure to look at.
+
+Firing every time is safe because **the dedupe lives one layer down and always did**: the
+`version` job clears `should_release` when the tag implied by `__version__` is already on
+the remote, and both build jobs are `if:`-gated on it. A push that cannot release costs one
+~15 s job and leaves a `::notice::` — visible, not silent.
+
+The two halves are a **pair**: remove the filter without the tag check and every push
+re-releases; keep the tag check but restore the filter and the silence comes back.
+`tests/test_release_trigger.py` asserts both, plus the `workflow_dispatch` escape hatch,
+and is mutation-tested (6/6 breakages caught).
+
+⚠️ **Consequence, stated plainly:** a push to a release branch whose version is *not yet
+tagged* **will publish**, whatever files it touched. What decides is tag state, not paths.
+`ci.yml`'s `version-check` therefore refuses a PR into `release/X.Y` whose version is
+already tagged — which also means **syncing a release branch with `main` without releasing
+is no longer one merge**. Bump the version, or land the sync elsewhere.
+
+!!! note "Remote lookups are assign-then-test, never `git ls-remote … | grep -q`"
+
+    All three remote queries in `release.yml` (and the new one in `ci.yml`) assign to a
+    variable and test `[ -n "$existing" ]`. Piping into `grep -q` reads a **failed lookup**
+    as "does not exist" — a network hiccup would then re-release an existing tag — and under
+    `-o pipefail` it is worse: `grep -q` exits at the first match, so a still-writing
+    producer takes SIGPIPE and fails a pipeline that had just succeeded. With the
+    assignment, `set -e` aborts on a failed query, which is the safe direction. (Hardening;
+    no such failure was observed. Same family as the `make_deb.sh` SIGPIPE, `CS-159`.)
 
 ### ⭐ The PR gate runs the RELEASE build — one composite action per OS (ADR-0009)
 

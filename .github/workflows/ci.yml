@@ -64,6 +64,27 @@ jobs:
 
           echo "OK: __version__ '$version' matches target branch '$base'."
 
+          # ⭐ AND THE VERSION MUST NOT BE RELEASED ALREADY (added 2026-08-13,
+          # CS-163). Merging into a release branch is how a release is MADE, so a
+          # PR whose version is already tagged can only produce a run that skips
+          # itself — release.yml sets should_release=false for exactly this. That
+          # used to be invisible (the old `paths` filter meant no run at all); it
+          # is now a ::notice:: after the merge. Catching it HERE makes it a red
+          # PR instead, while the fix — bumping __version__ — is still one commit
+          # away. ⚠️ CONSEQUENCE: syncing release/* with main WITHOUT releasing is
+          # no longer possible in one merge; bump the version, or push the sync
+          # commits directly. That is the intended trade (CS-163).
+          #
+          # Assign-then-test, never `git ls-remote … | grep -q`: `set -e` must
+          # abort on a failed LOOKUP rather than let it read as "not released".
+          tag="v$version"
+          existing=$(git ls-remote --tags origin "refs/tags/$tag")
+          if [ -n "$existing" ]; then
+            echo "::error::$tag is already tagged on the remote, so merging this PR into '$base' cannot release anything (release.yml would skip itself). Bump __version__ — see CONTRIBUTING.md → Triggering a release."
+            exit 1
+          fi
+          echo "OK: $tag is not yet on the remote — merging this PR into '$base' will release it."
+
   test-linux:
     runs-on: ubuntu-latest
     defaults:
