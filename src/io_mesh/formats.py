@@ -12,6 +12,24 @@ from __future__ import annotations
 
 import os
 
+#: ⛔ TEMPORARY (2026-10-12): opening MESH files is DISABLED.
+#:
+#: The mesh editing pipeline is too buggy to put in front of users. STEP/B-rep
+#: is unaffected and remains the supported path. This is a deliberate feature
+#: stunt, not a bug — set this back to True to restore the whole thing.
+#:
+#: Nothing is deleted: the extensions below, ``load_mesh``, the mesh workers and
+#: caches, and the OBJ/USD EXPORT paths all still exist and still work. Two
+#: places consult this flag:
+#:   * ``gui.main_window.load_file`` — THE single entry point that File > Open
+#:     and the CLI both funnel through, so there is no second door to miss. It
+#:     also drops the mesh formats from the open dialog's filter.
+#:   * ``main`` — rejects a mesh path on stderr before the GUI is launched.
+#:
+#: It lives HERE, in the pure module, so the CLI can read it without importing
+#: Qt/VTK/OCC just to print an error.
+MESH_OPEN_ENABLED = False
+
 #: Triangle-mesh extensions we open as an alternative to STEP. OBJ > USD > STL by
 #: user priority; the rest ride along via trimesh at near-zero cost. USD is read
 #: by pxr, everything else by trimesh.

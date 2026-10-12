@@ -79,6 +79,7 @@ from ..model.scene_config import (
 )
 from ..io_mesh.formats import (
     MESH_EXTENSIONS,
+    MESH_OPEN_ENABLED,
     assembly_has_brep,
     is_mesh_path,
 )
@@ -93,12 +94,39 @@ log = logging.getLogger(__name__)
 _STEP_FILTER = "STEP files (*.step *.stp);;All files (*)"
 _USD_FILTER = "USD files (*.usd *.usdc *.usda);;All files (*)"
 _OBJ_FILTER = "OBJ files (*.obj);;All files (*)"
-#: Open dialog filter accepting BOTH B-rep (STEP) and mesh files. STEP is listed
-#: first (priority #1); the mesh formats are the ADDITIVE alternative.
-_MESH_PATTERNS = " ".join("*" + e for e in MESH_EXTENSIONS)
-_OPEN_FILTER = (f"CAD & mesh files (*.step *.stp {_MESH_PATTERNS});;"
-                "STEP files (*.step *.stp);;"
-                f"Mesh files ({_MESH_PATTERNS});;All files (*)")
+
+
+def _globs(*exts: str) -> str:
+    """Name-filter globs for ``exts``, in BOTH lower and upper case.
+
+    ⚠️ Qt's name filters are case-SENSITIVE wherever its own dialog is used
+    (Linux — Windows gets the native dialog, which matches case-insensitively
+    because the filesystem does). So a bare ``*.step`` hides ``ROBOT.STEP`` from
+    the Linux file browser entirely. Verified against PySide6 6.11:
+
+        *.step  vs  robot.step  -> True
+        *.step  vs  robot.STEP  -> False
+
+    Listing both cases is the portable fix. A character class (``*.[sS][tT]…``)
+    would also catch mixed case and does work in Qt's dialog, but the Windows
+    NATIVE dialog does not understand character classes — it would match
+    nothing there. Mixed case (``robot.Step``) therefore still falls through to
+    the "All files" entry, which every filter below keeps for exactly that.
+    """
+    return " ".join(f"*{e} *{e.upper()}" for e in exts)
+
+
+#: Open dialog filter. STEP is priority #1; the mesh formats are the ADDITIVE
+#: alternative, offered only while MESH_OPEN_ENABLED (⛔ currently off — see the
+#: flag's note in io_mesh/formats.py).
+_MESH_PATTERNS = _globs(*MESH_EXTENSIONS)
+_STEP_PATTERNS = _globs(".step", ".stp")
+if MESH_OPEN_ENABLED:
+    _OPEN_FILTER = (f"CAD & mesh files ({_STEP_PATTERNS} {_MESH_PATTERNS});;"
+                    f"STEP files ({_STEP_PATTERNS});;"
+                    f"Mesh files ({_MESH_PATTERNS});;All files (*)")
+else:
+    _OPEN_FILTER = f"STEP files ({_STEP_PATTERNS});;All files (*)"
 
 #: Default allowable LINEAR mesh error (mm) for DISPLAY. Coarse = fast; dial down for quality.
 _DEFAULT_DEFLECTION = 10.0
@@ -1307,8 +1335,9 @@ class MainWindow(QMainWindow):
         return box.clickedButton() is apply_btn
 
     def _on_open(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open CAD or mesh file", "", _OPEN_FILTER)
+        title = ("Open CAD or mesh file" if MESH_OPEN_ENABLED
+                 else "Open STEP file")
+        path, _ = QFileDialog.getOpenFileName(self, title, "", _OPEN_FILTER)
         if path:
             self.load_file(path)
 
@@ -1317,8 +1346,21 @@ class MainWindow(QMainWindow):
         extension. THE single entry point (File > Open and the CLI both use it).
 
         The B-rep/STEP path is priority #1 and unchanged; mesh files branch to
-        the ADDITIVE, parallel mesh path."""
+        the ADDITIVE, parallel mesh path — currently gated off, see
+        ``MESH_OPEN_ENABLED``."""
         if is_mesh_path(path):
+            if not MESH_OPEN_ENABLED:
+                # The dialog no longer offers mesh formats, but "All files (*)"
+                # and the CLI can still hand us one, so refuse HERE rather than
+                # relying on the filter.
+                QMessageBox.warning(
+                    self, "Mesh files are temporarily unsupported",
+                    f"Opening mesh files is disabled in this build.\n\n"
+                    f"  {os.path.basename(path)}\n\n"
+                    "The mesh editing pipeline has known defects, so it has been "
+                    "switched off until they are fixed. STEP files (.step/.stp) "
+                    "are unaffected — open one of those instead.")
+                return
             self.load_mesh(path)
         else:
             self.load_step(path)
