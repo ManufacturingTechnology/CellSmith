@@ -17,7 +17,7 @@ This document describes the branch model, version conventions, release process, 
 | Branch | Lifetime | Purpose |
 |---|---|---|
 | `main` | long-lived, protected | Staging area for the next minor release. All new features land here first. |
-| `release/X.Y` | long-lived, protected | Published release branch for version line `X.Y`. Pushes that modify `__version__` here trigger the release workflow and ship `vX.Y.Z`. |
+| `release/X.Y` | long-lived, protected | Published release branch for version line `X.Y`. Every push here runs the release workflow; it ships `vX.Y.Z` unless that tag already exists. |
 | `dev/X.Y` | long-lived, protected | Staging area for `X.Y.x` patches (`X.Y.1`, `X.Y.2`, …). Created automatically by the release workflow when the first stable `X.Y.0` ships. |
 | `feature/<short-name>` | short-lived | Feature work, branched off `main`, merged back via PR. |
 | `bugfix/<short-name>` | short-lived | Bug fixes for an existing release line, branched off `dev/X.Y`, merged back via PR. |
@@ -67,8 +67,8 @@ flowchart LR
     M -->|"cut + PR<br/>(new minor)"| RL["release/X.&lt;new&gt;<br/>(published)"]
     B["bugfix/&lt;name&gt;<br/>(short-lived)"] -->|PR| D["dev/X.Y<br/>(staging for X.Y patches)"]
     D -->|"PR<br/>(ships patch)"| RX["release/X.Y<br/>(published)"]
-    RX -.->|"__version__ change"| W["release.yml<br/>workflow"]
-    RL -.->|"__version__ change"| W
+    RX -.->|"any push"| W["release.yml<br/>workflow"]
+    RL -.->|"any push"| W
     W -->|"creates tag<br/>+ GitHub Release"| GR["v{__version__}"]
     W -.->|"creates on first<br/>stable X.Y.0"| D
 ```
@@ -117,11 +117,38 @@ Before building, the workflow validates two things:
 - **The branch name matches the version's `X.Y`** — `release/0.1` must hold a `0.1.x` version, not
     `0.2.x`. This catches the "merged the wrong PR into the wrong branch" mistake.
 
-The PR gate checks a third thing, **before** the merge: a PR into `release/X.Y` whose `__version__`
-    is **already tagged on the remote** is refused, because merging it could only produce a run
-    that skips itself. The fix is to bump `__version__` in the same PR. ⚠️ This means **syncing a
-    release branch with `main` without releasing is no longer a single merge** — bump the version,
-    or push the sync commits some other way.
+The PR gate checks two more things, **before** the merge:
+
+- **A PR into `main`, `dev/X.Y` or `release/X.Y` whose `__version__` is already tagged on the remote is
+    refused.**
+    A released version must never be the *current* version on a staging or release branch. Into
+    `release/*`, merging it could only produce a run that skips itself. Into `main`, the stale
+    number would ride the next forward-merge into `release/*` and silently produce nothing there.
+    Refusing it at the door is what stops a released version from trickling anywhere.
+- ⚠️ **Two consequences.** The first PR into `main` after a release must carry the version bump —
+    until someone bumps it, `main` sits at a released version and the gate stays red. And syncing a
+    release branch with `main` *without* releasing is no longer a single merge: bump the version, or
+    push the sync commits some other way.
+
+Every protected branch is covered: `main`, `dev/X.Y` and `release/X.Y`. `dev/X.Y` is the `main` of
+    its patch line, so the same reasoning applies one level down — a fix landing on `dev/1.0` while
+    it still reads `1.0.0` would forward into `release/1.0` and release nothing.
+
+**Only the first PR after a release has to bump.** Once a branch reads an unreleased version, later
+    PRs onto it pass without bumping again, so several fixes accumulate under one pending number —
+    which is what ships when the branch is forwarded. Concretely, after `v1.0.0`:
+
+| PR | Version on the branch | Gate |
+|---|---|---|
+| bugfix A into `dev/1.0`, no bump | `1.0.0` (released) | ❌ refused — bump it |
+| bugfix A into `dev/1.0`, bumped | `1.0.1` | ✅ |
+| bugfix B into `dev/1.0`, no bump needed | `1.0.1` | ✅ |
+| bugfix C into `dev/1.0`, no bump needed | `1.0.1` | ✅ |
+| `dev/1.0` → `release/1.0` | `1.0.1` | ✅ ships `v1.0.1` with A + B + C |
+| bugfix D into `dev/1.0`, no bump | `1.0.1` (now released) | ❌ refused — bump to `1.0.2` |
+
+Short-lived branches (`feature/*`, `bugfix/*`, `forwardport/*`) are not PR targets, so nothing
+    changes for them.
 
 If the tag implied by `__version__` already exists on the remote, the workflow skips (preventing
     re-runs on a non-version commit, or on the same commit being pushed twice). To re-run a release
@@ -298,7 +325,9 @@ If multi-commit forward-ports become routine, consider configuring `dev/*` to us
     merge** for bugfix PRs — every bugfix then lands on the dev branch as a single commit, and
     forward-porting is always a single `git cherry-pick`. Trade-off: the granular history of how
     the fix was built up is collapsed. If you also want to keep the `__version__` bump out of the
-    squashed commit, split the bugfix into two PRs (fix-only, then bump).
+    squashed commit, split the bugfix into two PRs — but **bump first, then fix**. The version
+    gate refuses a PR onto `dev/X.Y` while the branch still reads the version that just
+    shipped, so a fix-only PR is red until the bump has landed. Reversing the order avoids it.
 
 
 ## Creating a new release
@@ -389,8 +418,8 @@ Protection is configured with **Rulesets** (Settings → Rules → Rulesets), no
 
 | Setting | Value |
 |---|---|
-| Allow merge commits | true (Default message) |
-| Allow squash merging | true (Default message) |
+| Allow merge commits | true (Pull request title) |
+| Allow squash merging | true (Pull request title) |
 | Allow rebase merging | true |
 
 All three are enabled because a ruleset can only *narrow* the allowed merge methods, never add one.
@@ -420,7 +449,7 @@ All three are enabled because a ruleset can only *narrow* the allowed merge meth
 | Require status checks to pass | true |
 | Require branches to be up to date before merging | false |
 | Do not require status checks on creation | false |
-| Status checks that are required | [build-windows, build-linux, version-check] |
+| Status checks that are required | [build-windows, build-linux, test-windows, test-linux, version-check] |
 | Block force pushes | true |
 
 Rationale:
@@ -490,7 +519,7 @@ This overlays `release/*` with the rules that should be **admin-bypassable**. Re
 | Require status checks to pass | true |
 | Require branches to be up to date before merging | true |
 | Do not require status checks on creation | false |
-| Status checks that are required | [build-windows, build-linux] |
+| Status checks that are required | [build-windows, build-linux, test-windows, test-linux, version-check] |
 | Block force pushes | true |
 
 Rationale:
@@ -532,16 +561,28 @@ Rationale:
 ### Pre-merge build check (`ci.yml`)
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on **`pull_request` events targeting
-    `main`, `dev/*`, and `release/*`**. It runs the CI-eligible test tier (`make test-ci` /
-    `test-ci.bat`) and freezes the app on both shipped platforms, then asserts the payload is
-    actually usable — the launcher reports `--version`, an unknown `--worker` is rejected, the
-    Qt plugin directory is populated, and the third-party notices are present. That catches build,
-    packaging, and import breakage *before* a PR merges.
+    `main`, `dev/*`, and `release/*`**, with five jobs:
 
-It deliberately **skips the slow packaging steps** — no `.zip`, no installer, no `.deb`, no artifact
-    upload — because those add ~15 minutes and only the release workflow needs them. It also runs
-    `version-check`, which is a no-op unless the PR targets `release/*` (above). Required
-    status-check names appear in a ruleset's search box after the workflow has run once on a PR.
+| Job | What it does |
+|---|---|
+| `build-linux` | The **complete** Linux release build, via the shared [`build-linux`](.github/actions/build-linux/action.yml) composite action: conda env → `make build` (freeze + `tar.gz` + `.deb`) → payload verification → artifact assertions. |
+| `build-windows` | The same for Windows, via [`build-windows`](.github/actions/build-windows/action.yml): freeze → zip → Inno Setup installer → payload verification → artifact assertions. |
+| `test-linux` | `pytest -m "not local_only"` under conda, with the system libraries offscreen rendering needs. Marker polarity is deliberate: a test is CI-eligible **by default** and must opt out with `@pytest.mark.local_only`, so a forgotten marker fails loudly here. |
+| `test-windows` | `pytest -m "not local_only and not gl"`. The `gl` tier is deselected **here and only here** — `windows-latest` has no GPU and no software OpenGL that VTK 9 can use. That tier is still covered for real by `test-linux`. |
+| `version-check` | Always validates that `__version__` parses and is semver. For PRs into `main` *or* `release/*` it also refuses a version that is already released; for `release/*` it additionally checks the `X.Y` line against the branch (above). |
+
+> **⭐ The gate runs the release build, not a cheaper approximation of it** (ADR-0009, changed
+>     2026-08-04). It used to be PyInstaller-only — no `.zip`, no installer, no `.deb` — because
+>     that saved ~15 minutes. Both of the costliest defects of the first release push were in
+>     exactly that skipped half: `make_deb.sh`'s SIGPIPE on the first real payload, and a version
+>     guard that had never worked. A step the gate does not run is a step nobody has tested.
+>
+> The build therefore lives in **one composite action per OS**, shared verbatim with `release.yml`;
+>     only artifact upload and tagging are release-only. Cost: the gate is ~15 min longer. Do not
+>     "optimize" this back into a cheaper build — see the ADR for the escape hatch that is
+>     acceptable (a paths-filter or label gate for docs-only PRs).
+
+Required status-check names appear in a ruleset's search box after the workflow has run once on a PR.
 
 The release workflow itself is **not** a required status check: it runs *after* merge (its trigger
     is the resulting push to `release/*`), so it can't be a pre-merge gate — which is exactly why

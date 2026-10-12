@@ -31,18 +31,23 @@ env:
 
 jobs:
   version-check:
-    # Two guards, deliberately at different scopes:
-    #   ALWAYS      — `__version__` parses and is semver. This is the check that
-    #                 actually fired in anger, and it is not release-specific: a
-    #                 malformed version breaks `make build`, the .deb version, and
-    #                 the tag. Running it only for release PRs meant the defect
-    #                 could sit on main until the release build hit it.
-    #   RELEASE PRs — the X.Y line matches the target branch, so the post-merge
-    #                 release workflow can't fail on a version/branch mismatch.
+    # Three guards, deliberately at three different scopes:
+    #   ALWAYS            — `__version__` parses and is semver. This is the check
+    #                       that actually fired in anger, and it is not
+    #                       release-specific: a malformed version breaks
+    #                       `make build`, the .deb version, and the tag. Running
+    #                       it only for release PRs meant the defect could sit on
+    #                       main until the release build hit it.
+    #   main, dev/*,      — the version is not one that has already been
+    #   release/*           released, so a released number can never be the
+    #                       current one on a protected branch. See GUARD 3.
+    #   release/* only    — the X.Y line matches the target branch, so the
+    #                       post-merge release workflow can't fail on a
+    #                       version/branch mismatch.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Validate __version__ (and, for release PRs, that it matches the branch)
+      - name: Validate __version__ (and, on protected branches, that it can still ship)
         run: |
           # Reads + semver-validates in one place, shared with release.yml. Do NOT
           # inline a parse here: the two inlined copies this replaced were both
@@ -51,39 +56,63 @@ jobs:
           echo "OK: __version__ '$version' is well-formed."
 
           base="${{ github.base_ref }}"
-          if [[ ! "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
-            echo "Base branch '$base' is not a release branch; skipping the branch-match check."
-            exit 0
-          fi
-          expected_minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
-          actual_minor=$(echo "$version" | cut -d'-' -f1 | cut -d. -f1-2)
-          if [ "$expected_minor" != "$actual_minor" ]; then
-            echo "::error::PR targets '$base' which expects version $expected_minor.x, but __version__ is '$version'"
-            exit 1
+          tag="v$version"
+
+          # GUARD 2 (release PRs only) — the X.Y line matches the target branch,
+          # so the post-merge release workflow can't fail on a version/branch
+          # mismatch. Catches "merged the wrong PR into the wrong branch".
+          if [[ "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+            expected_minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            actual_minor=$(echo "$version" | cut -d'-' -f1 | cut -d. -f1-2)
+            if [ "$expected_minor" != "$actual_minor" ]; then
+              echo "::error::PR targets '$base' which expects version $expected_minor.x, but __version__ is '$version'"
+              exit 1
+            fi
+            echo "OK: __version__ '$version' matches target branch '$base'."
           fi
 
-          echo "OK: __version__ '$version' matches target branch '$base'."
-
-          # ⭐ AND THE VERSION MUST NOT BE RELEASED ALREADY (added 2026-08-13,
-          # CS-163). Merging into a release branch is how a release is MADE, so a
-          # PR whose version is already tagged can only produce a run that skips
-          # itself — release.yml sets should_release=false for exactly this. That
-          # used to be invisible (the old `paths` filter meant no run at all); it
-          # is now a ::notice:: after the merge. Catching it HERE makes it a red
-          # PR instead, while the fix — bumping __version__ — is still one commit
-          # away. ⚠️ CONSEQUENCE: syncing release/* with main WITHOUT releasing is
-          # no longer possible in one merge; bump the version, or push the sync
-          # commits directly. That is the intended trade (CS-163).
+          # ⭐ GUARD 3 (main, dev/* AND release/*) — THE VERSION MUST NOT BE RELEASED
+          # ALREADY (added 2026-08-13, CS-163; widened to main 2026-09-21). One
+          # check, two distinct failures it prevents:
+          #
+          #   release/* — merging IS how a release is made, so a PR whose version
+          #               is already tagged can only produce a run that skips
+          #               itself (release.yml sets should_release=false for
+          #               exactly this). That used to be invisible — the old
+          #               `paths` filter meant no run at all — and is now a
+          #               ::notice:: after the merge. Catching it HERE makes it a
+          #               red PR instead, while the fix is one commit away.
+          #   main      — main stages the NEXT release. Letting it sit at a
+          #               version that already shipped means the stale number
+          #               rides the next forward-merge into release/*, where it
+          #               produces nothing. Refusing it at the door is what keeps
+          #               a released version from ever being current on main.
+          #
+          #   dev/X.Y   — dev/X.Y is the `main` of the X.Y patch line, so the
+          #               same argument applies one level down: a fix landing on
+          #               dev/1.0 while it still reads 1.0.0 would forward into
+          #               release/1.0 and release nothing.
+          #
+          # Only the FIRST PR after a release has to bump. Once the branch reads
+          # an unreleased version, later PRs onto it pass without bumping again —
+          # so several fixes accumulate under one pending number, which is what
+          # ships when the branch is forwarded.
+          #
+          # ⚠️ CONSEQUENCE: syncing a release branch with main WITHOUT releasing
+          # is no longer a single merge. That is the intended trade.
           #
           # Assign-then-test, never `git ls-remote … | grep -q`: `set -e` must
           # abort on a failed LOOKUP rather than let it read as "not released".
-          tag="v$version"
-          existing=$(git ls-remote --tags origin "refs/tags/$tag")
-          if [ -n "$existing" ]; then
-            echo "::error::$tag is already tagged on the remote, so merging this PR into '$base' cannot release anything (release.yml would skip itself). Bump __version__ — see CONTRIBUTING.md → Triggering a release."
-            exit 1
+          if [ "$base" = "main" ] || [[ "$base" =~ ^(dev|release)/ ]]; then
+            existing=$(git ls-remote --tags origin "refs/tags/$tag")
+            if [ -n "$existing" ]; then
+              echo "::error::$tag is already released (tagged on the remote), so it must not be the current __version__ on '$base'. Bump __version__ in this PR — see contributing.md → Triggering a release."
+              exit 1
+            fi
+            echo "OK: $tag is not yet on the remote."
+          else
+            echo "Base branch '$base' is not a protected staging or release branch; skipping the release-state check."
           fi
-          echo "OK: $tag is not yet on the remote — merging this PR into '$base' will release it."
 
   test-linux:
     runs-on: ubuntu-latest

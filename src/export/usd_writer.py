@@ -457,6 +457,7 @@ def write_subtree_usd(
     origin_frame_cids=None,
     joints=None,
     simplify_cids=None,
+    allow_empty: bool = False,
 ) -> int:
     """Write the meshed subtree at ``root_id`` to ``out_path``. Returns mesh count.
 
@@ -490,6 +491,13 @@ def write_subtree_usd(
     ``simplify_cids``: nodes marked "Simplify Bodies" — each one's whole subtree
     collapses into a single merged mesh at that node's prim. Strictly validated
     (see :func:`_author_components`); an empty/None set changes nothing.
+
+    ``allow_empty``: zero meshes normally RAISES (an interactive subtree export
+    of untessellated geometry is a user error). The composed exporter sets it
+    for Static, which is legitimately empty when every top-level node is an
+    asset or suppressed — it must still be WRITTEN (an empty default prim), so
+    a Static that had content on a previous export is overwritten rather than
+    left stale for the ``static.usda`` wrapper to keep referencing.
     """
     root = assembly.get(root_id)
     if root is None:
@@ -512,8 +520,12 @@ def write_subtree_usd(
                                   joints, simplify_cids)
 
     if n_meshes == 0:
-        stage.GetRootLayer().Save()
-        raise RuntimeError("No meshed geometry in this subtree — run “Show 3D” first.")
+        if not allow_empty:
+            stage.GetRootLayer().Save()
+            raise RuntimeError(
+                "No meshed geometry in this subtree — run “Show 3D” first.")
+        log.warning("%s has no meshed geometry — writing an EMPTY asset file",
+                    root.name)
 
     stage.SetDefaultPrim(stage.GetPrimAtPath(top_path))
     stage.SetMetadata("comment", f"CellSmith export of {root.name} ({n_meshes} meshes)")
@@ -656,6 +668,7 @@ def write_model_usd(
     origin_frame_cids=None,
     joints=None,
     simplify_cids=None,
+    allow_empty: bool = False,
 ) -> int:
     """Write a WHOLE model (all free roots) to ``out_path``. Returns mesh count.
 
@@ -663,7 +676,8 @@ def write_model_usd(
     :func:`write_subtree_usd` — the root IS the default prim (``/Root``).
     A multi-root model (Static may be one) gets a synthetic ``/Root`` Xform as
     the default prim with each free root as a child. Used by the composed
-    exporter for the per-asset files.
+    exporter for the per-asset files. ``allow_empty`` — see
+    :func:`write_subtree_usd` (the composed exporter sets it for Static).
     """
     roots = assembly.roots()
     if not roots:
@@ -674,7 +688,7 @@ def write_model_usd(
             up_direction="+Z", z_rotation_deg=0, scale=scale,
             meters_per_unit=meters_per_unit,
             origin_frame_cids=origin_frame_cids, joints=joints,
-            simplify_cids=simplify_cids)
+            simplify_cids=simplify_cids, allow_empty=allow_empty)
 
     suppressed = set(suppressed or ())
     excluded: set = set()
@@ -695,8 +709,11 @@ def write_model_usd(
         {r.component_id for r in roots}, export, scale,
         set(origin_frame_cids or ()) & included, joints, simplify_cids)
     if n_meshes == 0:
-        stage.GetRootLayer().Save()
-        raise RuntimeError("No meshed geometry in this model — run “Show 3D” first.")
+        if not allow_empty:
+            stage.GetRootLayer().Save()
+            raise RuntimeError(
+                "No meshed geometry in this model — run “Show 3D” first.")
+        log.warning("model has no meshed geometry — writing an EMPTY asset file")
     stage.SetDefaultPrim(stage.GetPrimAtPath(top_path))
     stage.GetRootLayer().Save()
     log.info("Exported %d meshes (multi-root) to %s", n_meshes, out_path)

@@ -23,6 +23,8 @@ from PySide6.QtCore import QPoint, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QScrollArea,
+    QSizePolicy,
     QSlider,
     QToolButton,
     QVBoxLayout,
@@ -529,6 +531,13 @@ class _EdgeOverlay:
         self.cell_component: Optional[np.ndarray] = None    # (n_cells,) int idx
 
 
+#: Floor on a viewport's width (px). The 3D view has no intrinsic minimum, so
+#: without this a splitter drag could collapse it to nothing; 240px keeps a
+#: usable view while letting a neighbouring pane (e.g. the main window's
+#: Model Tree) be dragged to nearly the whole window.
+_MIN_VIEW_W = 240
+
+
 class ViewportPanel(QWidget):
     """Embedded VTK render window showing one merged actor for the whole model."""
 
@@ -543,6 +552,7 @@ class ViewportPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        self.setMinimumWidth(_MIN_VIEW_W)
         #: When True, the owner window drives ``set_scene_origin`` itself (the
         #: main window's selection-aware logic; the Transform window's datum
         #: marker) — the strip's Global Origin toggle must not fight it.
@@ -993,7 +1003,38 @@ class ViewportPanel(QWidget):
             self._on_measure_mode_combo)
         row.addWidget(self._measure_mode_combo)
 
-        layout.addWidget(strip)
+        # The strip's controls live in an inner widget inside a HORIZONTAL
+        # QScrollArea (the same trick the Selection Filter / Construction bars
+        # use). Summing every control gave the strip a ~1400px MINIMUM width,
+        # which propagated to the whole ViewportPanel and silently capped how
+        # far the main window's left (Model Tree) splitter pane could be dragged
+        # — the viewport simply refused to shrink. Scrolling the strip instead
+        # lets the viewport shrink to ``_MIN_VIEW_W``.
+        holder = QWidget(self)
+        scroll = QScrollArea(holder)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(strip)
+        outer = QHBoxLayout(holder)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+        # Pin to ONE row, growing by the h-scrollbar's band only while that bar
+        # is actually needed (a narrow viewport) — so a wide viewport doesn't
+        # pay ~14px of dead space forever, and a narrow one scrolls the strip
+        # horizontally instead of sprouting a vertical scrollbar.
+        hbar = scroll.horizontalScrollBar()
+        base_h = strip.sizeHint().height()
+        sbh = max(5, hbar.sizeHint().height())
+
+        def _fit_strip_height(*_a) -> None:
+            scroll.setFixedHeight(base_h + (sbh if hbar.maximum() > 0 else 0))
+
+        hbar.rangeChanged.connect(_fit_strip_height)
+        _fit_strip_height()
+        holder.setSizePolicy(QSizePolicy.Policy.Preferred,
+                             QSizePolicy.Policy.Fixed)
+        layout.addWidget(holder)
 
     def _build_selection_bars(self, layout: QVBoxLayout) -> None:
         """Bottom-of-viewport selection menus (Construction Geometry above the

@@ -195,6 +195,15 @@ exports).
       that payloads the asset — see `export.md` § *Simplify Bodies*. `load_one`
       also VALIDATES them before anything is written, so a stale mark fails the
       build naming its model rather than part-way through authoring.
+      ⭐ **An EMPTY Static is still WRITTEN** (`CS-165`): when every top-level
+      node is an asset or suppressed, Static is one shapeless root. `_compose_usd`
+      passes `allow_empty=True` for Static only → an empty default prim + a
+      warning, and `/Static` stays in the scene. **Never skip Static** — a skipped
+      write leaves a previous export's `static_base.usd` STALE for the create-once
+      `static.usda` wrapper (or anything referencing it directly) to keep
+      composing. Default `allow_empty=False` still raises for the interactive
+      subtree export and for an empty ASSET. OBJ/STEP compose need no guard (an
+      empty Static just contributes nothing — probe-verified on Stamping1).
     - **`{slug}.usda`** = a thin **OVERRIDE wrapper** whose single default prim
       **references** `./{slug}_base.usd` (`write_override_wrapper`; the old name
       `write_asset_override_wrapper` is kept as an alias — the helper now serves the
