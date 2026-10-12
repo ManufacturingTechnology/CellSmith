@@ -146,8 +146,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "step_file",
         nargs="?",
         default=None,
-        help="Optional path to a file to auto-load on launch: a .step/.stp "
-             "(B-rep) OR a mesh file (.obj/.stl/.usd/.ply/.gltf/.glb/.3mf/…).",
+        help="Optional path to a .step/.stp (B-rep) file to auto-load on "
+             "launch. Mesh files (.obj/.stl/.usd/…) are TEMPORARILY rejected "
+             "while the mesh editing pipeline is being fixed.",
     )
     parser.add_argument(
         "-f",
@@ -219,6 +220,16 @@ def main(argv: list[str] | None = None) -> int:
         if not os.path.isfile(step_path):
             # Fail loud before spinning up the GUI.
             print(f"error: STEP file not found: {step_path}", file=sys.stderr)
+            return 2
+        # TEMPORARY: mesh opening is switched off (see MESH_OPEN_ENABLED in
+        # io_mesh/formats.py). load_file would refuse it anyway, but only after
+        # the GUI is up — on the CLI, say so on stderr and skip the launch.
+        from .io_mesh.formats import MESH_OPEN_ENABLED, is_mesh_path
+        if is_mesh_path(step_path) and not MESH_OPEN_ENABLED:
+            print(f"error: opening mesh files is disabled in this build: "
+                  f"{step_path}\n"
+                  f"       The mesh editing pipeline has known defects. "
+                  f"Open a STEP file (.step/.stp) instead.", file=sys.stderr)
             return 2
 
     # On Linux prefer X11/XWayland: VTK's QVTKRenderWindowInteractor has no

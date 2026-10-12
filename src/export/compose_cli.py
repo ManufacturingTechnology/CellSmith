@@ -303,7 +303,8 @@ def _compose_usd(models, static, out_path: str, scene_name: str,
     asset_dir = os.path.join(os.path.dirname(out_path) or ".", asset_dir_name)
     os.makedirs(asset_dir, exist_ok=True)
 
-    def _write_layered(asm, slug, excluded, frames, joints, simplify):
+    def _write_layered(asm, slug, excluded, frames, joints, simplify,
+                       allow_empty=False):
         """Write ``{slug}_base.usd`` (always) + ensure ``{slug}.usda`` (once).
 
         The base holds the full authored export and is OVERWRITTEN every time;
@@ -315,7 +316,7 @@ def _compose_usd(models, static, out_path: str, scene_name: str,
         n = write_model_usd(
             asm, os.path.join(asset_dir, base_name),
             suppressed=excluded, scale=scale, origin_frame_cids=frames,
-            joints=joints, simplify_cids=simplify)
+            joints=joints, simplify_cids=simplify, allow_empty=allow_empty)
         write_override_wrapper(
             os.path.join(asset_dir, base_name),
             os.path.join(asset_dir, wrapper_name))
@@ -330,7 +331,13 @@ def _compose_usd(models, static, out_path: str, scene_name: str,
             entries.append((name, rel, _meter_place(w, scale), p))
     if static is not None:
         asm, excluded, frames, joints, simplify = static
-        n, rel = _write_layered(asm, "static", excluded, frames, joints, simplify)
+        # Static is legitimately EMPTY when every top-level node is an asset or
+        # suppressed. Still write it (empty default prim) and keep it in the
+        # scene: skipping would leave a previous export's static_base.usd behind,
+        # stale, for anything referencing static.usda directly — and would drop
+        # the /Static prim that overrides in main.usda may target.
+        n, rel = _write_layered(asm, "static", excluded, frames, joints, simplify,
+                                allow_empty=True)
         n_meshes += n
         entries.append(("Static", rel, None, "static"))
     # The SCENE gets the same base/override split as each asset: the composed

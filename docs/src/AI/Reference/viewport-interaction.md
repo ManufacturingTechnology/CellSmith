@@ -224,6 +224,19 @@ Everything about the 3D viewport (`viewport_panel.py`): the mouse/interactor mod
   toggles, Opacity slider — ALL bound to the ONE `ViewSettingsBus` MainWindow owns
   (module-level default via `set_default_bus`; panels SELF-ATTACH in `__init__`,
   zero constructor plumbing).
+  - **The strip SCROLLS horizontally** (inner content widget inside a frameless
+    `QScrollArea`, v-scrollbar off — the same trick the Selection Filter /
+    Construction bars use). Summing its controls otherwise gave the strip a
+    ~**1417px minimum width**, which propagated to the whole `ViewportPanel`
+    and silently CAPPED how far the main window's left (Model Tree) splitter
+    pane could be dragged — the viewport refused to shrink, so the pane looked
+    like it had a max width (probe-verified 2026-09-12: `minimumSizeHint` 1417 →
+    68 px). The scroll area is pinned to ONE row and grows by the h-scrollbar's
+    band ONLY while that bar is needed (`hbar.rangeChanged` → `_fit_strip_height`),
+    so a wide viewport is pixel-identical to before. The viewport's own floor
+    is now `viewport_panel._MIN_VIEW_W` (240px, set in `__init__`) — enough to
+    keep a usable 3D view while the left pane can be dragged to nearly the whole
+    window.
   - **Perspective** (`viewport.set_perspective`) toggles perspective
     (vanishing-point) vs the DEFAULT orthographic projection (`enable_/
     disable_parallel_projection`; re-applied after every `load`). PERSISTED

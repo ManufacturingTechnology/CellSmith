@@ -46,6 +46,17 @@
             "args": ["${workspaceFolder}/test_files/testB2.step"]
         },
         {
+            "name": "testB3",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testB3.step"]
+        },
+        {
             "name": "testC1",
             "type": "debugpy",
             "request": "launch",
@@ -110,6 +121,39 @@
             "console": "integratedTerminal",
             "justMyCode": true,
             "args": ["${workspaceFolder}/test_files/testH1.step"]
+        },
+        {
+            "name": "testH2",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testH2.step"]
+        },
+        {
+            "name": "testJ1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testJ1.step"]
+        },
+        {
+            "name": "testK1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.main",
+            "python": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args": ["${workspaceFolder}/test_files/testK1.step"]
         },
         {
             "name": "CellSmith (+ refresh doc screenshots)",
