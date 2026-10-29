@@ -2,5 +2,6 @@
     "editor.rulers": [120],
     "git.openRepositoryInParentFolders": "always",
     "git.autoRepositoryDetection": true,
-    "python.defaultInterpreterPath": "${userHome}/AppData/Local/anaconda3/envs/CellSmithEnv/python.exe"
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }

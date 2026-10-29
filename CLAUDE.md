@@ -60,7 +60,9 @@ The SF/CGB redesign is **fully implemented** (headless/offscreen-verified; GL li
   extraction. We use pyvista's own VTK (pip) for the viewport, so `novtk` is fine.
 - `dev.bat` has a lock (`.env_setup.lock`) so two concurrent env-creates can't
   corrupt the env. Don't run dev/run twice in parallel during first setup.
-- Interpreter for VS Code / launch.json: `…/anaconda3/envs/CellSmithEnv/python.exe`.
+- VS Code: `.vscode/` hardcodes **no interpreter path** (works on Windows + Linux). Launch configs and the
+  screenshot tasks use the workspace's selected interpreter — run *Python: Select Interpreter →
+  CellSmithEnv* once per machine. Test tasks run `test.bat` on Windows, `make test`/`test-ci` on Linux.
 - **Headless runs when `conda` isn't on `PATH`** (common here): `& "$env:LOCALAPPDATA\anaconda3\Scripts\conda.exe" run -n CellSmithEnv python …` (PowerShell); env at `%LOCALAPPDATA%\anaconda3\envs\CellSmithEnv`. Full guidance in `docs/src/AI/Reference/invariants.md`.
 
 
