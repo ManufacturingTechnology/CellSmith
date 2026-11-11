@@ -1,0 +1,207 @@
+name: CI
+
+# Pre-merge build check. Runs on PRs into the protected staging/release branches so
+# a PR can't merge unless CellSmith still builds into a usable, fully packaged
+# release on both shipped platforms. Mark `build-linux`, `build-windows`,
+# `test-linux`, `test-windows` and `version-check` as required status checks
+# (see CONTRIBUTING.md → Branch protection rules).
+#
+# ⭐ THIS GATE RUNS THE FULL RELEASE BUILD (ADR-0009, changed 2026-08-04). It used
+# to skip the packaging — no .zip, no installer, no .deb — because that saved ~15
+# minutes. Both of the costliest defects of the first release push were in exactly
+# that skipped half. The build now lives in ONE composite action per OS, shared
+# verbatim with release.yml; only artifact upload and tagging are release-only.
+# Do not "optimize" this back into a cheaper build — see the ADR for the escape
+# hatch that is acceptable (a paths-filter or label gate for docs-only PRs).
+on:
+  pull_request:
+    branches: [main, 'dev/*', 'release/*']
+
+# A new push to the same PR cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Nothing in CI has a display or a GPU driver.
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  version-check:
+    # Three guards, deliberately at three different scopes:
+    #   ALWAYS            — `__version__` parses and is semver. This is the check
+    #                       that actually fired in anger, and it is not
+    #                       release-specific: a malformed version breaks
+    #                       `make build`, the .deb version, and the tag. Running
+    #                       it only for release PRs meant the defect could sit on
+    #                       main until the release build hit it.
+    #   main, dev/*,      — the version is not one that has already been
+    #   release/*           released, so a released number can never be the
+    #                       current one on a protected branch. See GUARD 3.
+    #   release/* only    — the X.Y line matches the target branch, so the
+    #                       post-merge release workflow can't fail on a
+    #                       version/branch mismatch.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate __version__ (and, on protected branches, that it can still ship)
+        run: |
+          # Reads + semver-validates in one place, shared with release.yml. Do NOT
+          # inline a parse here: the two inlined copies this replaced were both
+          # unanchored and matched the module docstring. See the script's header.
+          version=$(bash .github/scripts/read-version.sh) || exit 1
+          echo "OK: __version__ '$version' is well-formed."
+
+          base="${{ github.base_ref }}"
+          tag="v$version"
+
+          # GUARD 2 (release PRs only) — the X.Y line matches the target branch,
+          # so the post-merge release workflow can't fail on a version/branch
+          # mismatch. Catches "merged the wrong PR into the wrong branch".
+          if [[ "$base" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+            expected_minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            actual_minor=$(echo "$version" | cut -d'-' -f1 | cut -d. -f1-2)
+            if [ "$expected_minor" != "$actual_minor" ]; then
+              echo "::error::PR targets '$base' which expects version $expected_minor.x, but __version__ is '$version'"
+              exit 1
+            fi
+            echo "OK: __version__ '$version' matches target branch '$base'."
+          fi
+
+          # ⭐ GUARD 3 (main, dev/* AND release/*) — THE VERSION MUST NOT BE RELEASED
+          # ALREADY (added 2026-08-13, CS-163; widened to main 2026-09-21). One
+          # check, two distinct failures it prevents:
+          #
+          #   release/* — merging IS how a release is made, so a PR whose version
+          #               is already tagged can only produce a run that skips
+          #               itself (release.yml sets should_release=false for
+          #               exactly this). That used to be invisible — the old
+          #               `paths` filter meant no run at all — and is now a
+          #               ::notice:: after the merge. Catching it HERE makes it a
+          #               red PR instead, while the fix is one commit away.
+          #   main      — main stages the NEXT release. Letting it sit at a
+          #               version that already shipped means the stale number
+          #               rides the next forward-merge into release/*, where it
+          #               produces nothing. Refusing it at the door is what keeps
+          #               a released version from ever being current on main.
+          #
+          #   dev/X.Y   — dev/X.Y is the `main` of the X.Y patch line, so the
+          #               same argument applies one level down: a fix landing on
+          #               dev/1.0 while it still reads 1.0.0 would forward into
+          #               release/1.0 and release nothing.
+          #
+          # Only the FIRST PR after a release has to bump. Once the branch reads
+          # an unreleased version, later PRs onto it pass without bumping again —
+          # so several fixes accumulate under one pending number, which is what
+          # ships when the branch is forwarded.
+          #
+          # ⚠️ CONSEQUENCE: syncing a release branch with main WITHOUT releasing
+          # is no longer a single merge. That is the intended trade.
+          #
+          # Assign-then-test, never `git ls-remote … | grep -q`: `set -e` must
+          # abort on a failed LOOKUP rather than let it read as "not released".
+          if [ "$base" = "main" ] || [[ "$base" =~ ^(dev|release)/ ]]; then
+            existing=$(git ls-remote --tags origin "refs/tags/$tag")
+            if [ -n "$existing" ]; then
+              echo "::error::$tag is already released (tagged on the remote), so it must not be the current __version__ on '$base'. Bump __version__ in this PR — see contributing.md → Triggering a release."
+              exit 1
+            fi
+            echo "OK: $tag is not yet on the remote."
+          else
+            echo "Base branch '$base' is not a protected staging or release branch; skipping the release-state check."
+          fi
+
+  test-linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # -l so conda's shell hook is active. ⛔ A step running under a LOGIN
+        # shell must never call the `exit` builtin: bash then sources
+        # ~/.bash_logout, and the status of ITS last command replaces yours —
+        # `exit 0` becomes exit 1 on an Ubuntu runner. This cost a CI round-trip
+        # once already (see .github/actions/build-linux/action.yml). Let the
+        # script fall off its end, or give the step `shell: bash`.
+        # Enforced by tests/test_workflow_shell_hygiene.py.
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the system libraries offscreen rendering needs
+        # NOT optional and NOT inferable: VTK segfaults without a GL backend
+        # (libegl1) rather than raising, and Qt needs the xcb set even under
+        # QT_QPA_PLATFORM=offscreen. Verified list: Reference/testing.md.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libglx-mesa0 libgl1-mesa-dri \
+            libglib2.0-0t64 libxkbcommon0 libxkbcommon-x11-0 libxrender1 \
+            libxext6 libfontconfig1 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          environment-file: packaging/environment.yml
+          activate-environment: CellSmithEnv
+          auto-activate: false        # `auto-activate-base` is deprecated
+          conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
+      - name: Run the CI-eligible tier
+        # Marker polarity: a test is CI-eligible BY DEFAULT and must opt out with
+        # @pytest.mark.local_only, so a forgotten marker fails loudly here.
+        run: pytest -m "not local_only" -q
+
+  test-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          environment-file: packaging/environment.yml
+          activate-environment: CellSmithEnv
+          auto-activate: false        # `auto-activate-base` is deprecated
+          conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
+      - name: Run the CI-eligible tier (minus `gl` — see below)
+        # ⛔ `gl` IS DESELECTED HERE, AND ONLY HERE. windows-latest has no GPU and
+        # no software OpenGL that VTK 9 can use: Windows' fallback opengl32.dll is
+        # the GDI generic renderer (OpenGL 1.1), while VTK's OpenGL2 backend needs
+        # 3.2+. It does not raise — `pv.Plotter.screenshot()` takes an access
+        # violation and the runner dies with exit 139, so no test can catch it.
+        #
+        # NOT fixed by LIBGL_ALWAYS_SOFTWARE=1 (which used to be set here): that is
+        # a *Mesa* variable and Windows VTK goes through WGL, never Mesa.
+        #
+        # The `gl` tier is still covered — the Linux job above runs it for real via
+        # libegl1 (Reference/testing.md documents that backend matrix). What this
+        # job uniquely covers is Windows-native behaviour of the non-GL tiers.
+        # To restore `gl` here, a Mesa3D llvmpipe opengl32.dll must be dropped
+        # beside python.exe; see status.md.
+        run: pytest -m "not local_only and not gl" -q
+
+  # ⭐ THE GATE RUNS THE RELEASE BUILD, NOT A CHEAPER APPROXIMATION OF IT.
+  # Both jobs below are the SAME composite actions release.yml uses, so every
+  # packaging step — tar.gz, .deb, zip, Inno installer, the artifact assertions —
+  # is exercised on the feature→main PR. It used to be PyInstaller-only here
+  # ("~15 min shorter"), and the two defects that cost the most to find were both
+  # in the half the gate skipped: make_deb.sh's SIGPIPE on the first real payload,
+  # and a version guard that had never worked. A step the gate does not run is a
+  # step nobody has tested. Cost: the gate is ~15 min longer. See ADR-0009.
+  build-linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/build-linux
+
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/build-windows

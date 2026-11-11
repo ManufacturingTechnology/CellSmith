@@ -1,0 +1,81 @@
+name: Build CellSmith (Windows)
+description: >
+  The COMPLETE Windows release build — conda env, conda on PATH for cmd, Inno
+  Setup discovery, `build.bat ci` (freeze + zip + installer), payload
+  verification, artifact assertion. Shared verbatim by the PR gate and the
+  release workflow.
+
+# See .github/actions/build-linux/action.yml for why this is a composite action
+# and not two copies of the steps. Short version: a step the PR gate does not run
+# is a step nobody has tested until release day, and duplicated steps drift.
+# Anything release-SPECIFIC (collect, upload, tag) stays in release.yml.
+
+runs:
+  using: composite
+  steps:
+    - name: Report free disk space
+      shell: pwsh
+      run: Get-PSDrive C | Format-List Used, Free
+    - uses: conda-incubator/setup-miniconda@v4
+      with:
+        environment-file: packaging/environment.yml
+        activate-environment: CellSmithEnv
+        auto-activate: false        # `auto-activate-base` is deprecated
+        conda-remove-defaults: true # env pins conda-forge ONLY (see environment.yml)
+    - name: Put conda on PATH for cmd
+      # build.bat / dev.bat call bare `conda`, which setup-miniconda only wires
+      # into the bash/pwsh profiles. Without this the `shell: cmd` step below
+      # fails at dev.bat's `where conda` check.
+      shell: bash -el {0}
+      run: dirname "$(which conda)" >> "$GITHUB_PATH"
+    - name: Locate the Inno Setup compiler
+      # Inno Setup 6 IS preinstalled on windows-latest, but the runner-image
+      # manifest does not document its PATH and build.bat only WARNS when it
+      # cannot find ISCC. Find it deliberately, fail here if absent, and hand the
+      # absolute path to build.bat via %ISCC% (which it honours over its probing).
+      shell: pwsh
+      run: .github/scripts/find-iscc.ps1
+    - name: Build zip + installer
+      # `build.bat ci` runs the full pipeline: env check, PyInstaller, the robust
+      # zip, then Inno Setup using the %ISCC% exported above.
+      shell: cmd
+      run: build.bat ci
+    - name: Verify the payload is usable
+      shell: bash -el {0}
+      run: bash .github/scripts/verify-payload.sh dist/CellSmith CellSmith.exe
+    - name: Assert both Windows artifacts were produced
+      # ⭐ build.bat only WARNS and continues when ISCC is not found, so a missing
+      # installer would otherwise pass silently. This assertion is why the check
+      # lives in the shared action: the PR gate must catch it, not just release.
+      #
+      # `shell: bash` (= bash --noprofile --norc -eo pipefail {0}), not
+      # `bash -el {0}`: globbing and stat'ing files needs no conda env, and a
+      # LOGIN shell that runs the `exit` builtin sources ~/.bash_logout, whose
+      # last command's status then overrides the `exit`. That is what failed the
+      # Linux twin (it exited 1 after printing only `ok` lines); Git Bash on the
+      # Windows runner has no ~/.bash_logout today, but the rule is the same and
+      # tests/test_workflow_shell_hygiene.py enforces it on both. Full write-up
+      # and the probe: the sibling build-linux action.
+      shell: bash
+      run: |
+        rc=0
+        say_missing() { echo "::error::$1"; rc=1; }
+        # Unquoted glob; unmatched patterns stay literal, so -e fails. Do NOT
+        # write `[ -e "$f" ] && hit=$f` — under `set -e` the no-match path would
+        # abort the script instead of reporting.
+        for spec in "zip:dist/CellSmith-v*-win64.zip" "installer:dist/CellSmith-v*-setup.exe"; do
+          kind="${spec%%:*}"; pat="${spec#*:}"
+          hit=""
+          for f in $pat; do
+            if [ -e "$f" ]; then hit="$f"; fi
+          done
+          if [ -n "$hit" ]; then
+            echo "  ok    $hit ($(du -h "$hit" | cut -f1))"
+          elif [ "$kind" = installer ]; then
+            say_missing "No installer was produced. build.bat skips Inno Setup with only a warning when ISCC is not found — check the build log for 'Inno Setup 6 not found'."
+          else
+            say_missing "no zip was produced — see the build log"
+          fi
+        done
+        echo "verdict: rc=$rc"
+        exit "$rc"

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CellSmith
+GenericName=Manufacturing Rigging Tool
+Comment=A tool for transforming 3D models for manufacturing simulations.
+Exec=cellsmith %f
+TryExec=cellsmith
+Icon=cellsmith
+Terminal=false
+Categories=Graphics;Engineering;Science;3DGraphics;
+Keywords=CAD;STEP;USD;Isaac;robot;rigging;kinematics;
+StartupNotify=true
+StartupWMClass=CellSmith
+MimeType=model/step;application/x-step;model/vnd.usd;model/obj;model/stl;

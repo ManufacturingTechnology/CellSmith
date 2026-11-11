@@ -1,0 +1,11 @@
+# pip-installable dependencies (secondary reference).
+#
+# NOTE: pythonocc-core is NOT here — it has no pip wheel and must be installed
+# from conda-forge. Use environment.yml (conda) as the source of truth for the
+# full environment. These are the pieces pip can install into that conda env.
+PySide6
+pyvista
+pyvistaqt
+numpy
+pyyaml
+pydantic

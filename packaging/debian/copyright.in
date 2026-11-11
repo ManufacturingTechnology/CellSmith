@@ -1,0 +1,40 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: CellSmith
+Source: https://github.com/ManufacturingTechnology/CellSmith
+
+Files: *
+Copyright: @YEAR@ @MAINTAINER@
+License: Apache-2.0
+
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+ this file except in compliance with the License. You may obtain a copy of the
+ License at
+ .
+     http://www.apache.org/licenses/LICENSE-2.0
+ .
+ Unless required by applicable law or agreed to in writing, software distributed
+ under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+ CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ specific language governing permissions and limitations under the License.
+ .
+ On Debian systems the full text of the Apache License version 2.0 is in
+ /usr/share/common-licenses/Apache-2.0, and a copy also ships with this package
+ at /opt/cellsmith/_internal/LICENSE.TXT.
+
+Comment:
+ THIRD-PARTY COMPONENTS. This package bundles its own Python runtime together
+ with OpenCASCADE (OCCT), pythonocc-core, Qt 6 via PySide6, VTK, OpenUSD and
+ others, each under its own terms -- including LGPL-2.1 (OCCT, libiconv),
+ LGPL-3.0 (Qt/PySide6, pythonocc-core) and the FreeImage Public License.
+ .
+ The complete, generated attribution list -- naming every component, reproducing
+ every license text verbatim, and carrying the LGPL written offer for source code
+ -- is installed at:
+ .
+     /usr/share/doc/cellsmith/THIRD-PARTY-NOTICES.md
+ .
+ It is also inside the payload at
+ /opt/cellsmith/_internal/THIRD-PARTY-NOTICES.md. Read that file rather than this
+ one for third-party terms; it is regenerated from the build environment on every
+ release, whereas this file describes only CellSmith's own code.

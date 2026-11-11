@@ -1,0 +1,30 @@
+__pycache__/
+.claude/*.local.json
+# Per-session markers for the doc-flush gate (see .claude/skills/precompact)
+.claude/.flush/
+test_files/
+venv/
+*.whl
+*.cellsmith.cache/
+*.cellsmith.json
+.env_setup.lock
+*crash.log
+build/
+dist/
+scratchpad/
+# Visual-test artifacts: goldens + authored counter-examples ARE committed;
+# per-run actual/diff renders are not (see AI/Scratch/ai-metaanalysis.md 3.1.8).
+docs/src/**/_images/**/actual-*.png
+docs/src/**/_images/**/diff-*.png
+tests/_artifacts/
+tests/fixtures/private/
+
+# Generated doc screenshots (build output - see docs/generate_screenshots.py)
+docs/src/_screenshots/
+# Local denylist for .github/scripts/check-content.py: the terms themselves are private.
+.claude/confidential-terms.txt
+# Local-only AI docs (CS-167, decision B): working docs + AI-workflow research, never committed. They hold
+# the user's own words, so they must not ride along with a `git add -A`. (Moves to docs/scratch/ in the reorg.)
+docs/src/AI/Scratch/
+docs/src/AI/Research/
+docs/derive_metrics.py
