@@ -1,0 +1,251 @@
+name: Release
+
+# Fires on EVERY push to release/* — see CONTRIBUTING.md → Triggering a release.
+#
+# ⭐ THERE IS DELIBERATELY NO `paths:` FILTER (removed 2026-08-13, CS-163). It
+# used to be `paths: ['src/__version__.py']`, which made a merge into a release
+# branch a SILENT no-op whenever the version had not changed: GitHub evaluates a
+# push's paths filter against a TWO-DOT diff of the push's before/after SHAs, so
+# merging main into release/0.1 while both tips carry the same version matched
+# nothing, queued no run, and reported nothing anywhere. A release that does not
+# happen must not look identical to one that was never asked for.
+#
+# Firing every time is cheap and safe because the DEDUPE ALREADY EXISTS one layer
+# down: the `version` job below sets should_release=false when the tag implied by
+# __version__ is already on the remote, and both build jobs are gated on it. So a
+# push that cannot release costs one ~15 s job and leaves a ::notice:: saying why
+# — visible, instead of silent. ⚠️ The flip side: a push to a release branch whose
+# version is NOT yet tagged WILL publish, whatever files it touched. What decides
+# is tag state, not which paths changed. `ci.yml`'s version-check refuses a PR
+# into release/* whose version is already tagged, so the mistake is caught before
+# the merge rather than after it.
+#
+# No recursion: the tag push below is a TAG, and this trigger matches branches.
+on:
+  push:
+    branches: ['release/*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.derive.outputs.tag }}
+      version: ${{ steps.derive.outputs.version }}
+      minor: ${{ steps.derive.outputs.minor }}
+      prerelease: ${{ steps.derive.outputs.prerelease }}
+      should_release: ${{ steps.derive.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: derive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branch="${GITHUB_REF_NAME}"
+
+          # Reads + semver-validates in one place, shared with ci.yml. Do NOT inline
+          # a parse here: the two inlined copies this replaced were both unanchored
+          # and matched the module docstring. See the script's header.
+          version=$(bash .github/scripts/read-version.sh)
+
+          tag="v$version"
+
+          if [[ "$branch" =~ ^release/([0-9]+)\.([0-9]+)$ ]]; then
+            expected_minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            actual_minor=$(echo "$version" | cut -d'-' -f1 | cut -d. -f1-2)
+            if [ "$expected_minor" != "$actual_minor" ]; then
+              echo "::error::Branch '$branch' expects version $expected_minor.x, but __version__ is '$version'"
+              exit 1
+            fi
+          else
+            echo "::error::Branch '$branch' is not a release branch (expected 'release/X.Y')"
+            exit 1
+          fi
+
+          # Semver: a `-` suffix marks a prerelease.
+          if [[ "$tag" == *-* ]]; then prerelease=true; else prerelease=false; fi
+
+          # On `push`, skip if the tag already exists on the remote — this commit
+          # didn't actually bump the version. On `workflow_dispatch`, always
+          # proceed so a broken release can be re-run.
+          # ⭐ THIS IS THE ONLY THING STOPPING A DUPLICATE RELEASE now that the
+          # trigger has no paths filter — the build jobs are gated on it. Assign
+          # first, then test: `git ls-remote … | grep -q` would report "tag absent"
+          # for a NETWORK failure too (and `grep -q` exits early, so under
+          # `pipefail` a SIGPIPE'd producer can fail an otherwise-successful
+          # pipeline). With the assignment, `set -e` aborts the job if the query
+          # itself fails, which is the safe direction — a failed lookup must never
+          # read as "not released yet".
+          should_release=true
+          if [ "${{ github.event_name }}" = "push" ]; then
+            existing=$(git ls-remote --tags origin "refs/tags/$tag")
+            if [ -n "$existing" ]; then
+              echo "::notice::Tag $tag already exists on remote — skipping (use workflow_dispatch to re-run)"
+              should_release=false
+            fi
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "minor=$expected_minor"
+            echo "prerelease=$prerelease"
+            echo "should_release=$should_release"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Branch:         $branch"
+          echo "Version:        $version"
+          echo "Tag:            $tag"
+          echo "Prerelease:     $prerelease"
+          echo "Should release: $should_release"
+
+  build-linux:
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # ⛔ LOGIN shell — no step under this default may call the `exit`
+        # builtin; ~/.bash_logout's last command would replace its status (an
+        # `exit 0` reported as exit 1). See .github/actions/build-linux/action.yml
+        # and tests/test_workflow_shell_hygiene.py.
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      # The build is a SHARED composite action, identical to the one the PR gate
+      # runs — see .github/actions/build-linux/action.yml for why. It ends having
+      # already asserted both artifacts exist, so the collect step only moves them.
+      - uses: ./.github/actions/build-linux
+      - name: Collect the artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          mv dist/CellSmith-v*-linux-x86_64.tar.gz out/
+          mv dist/cellsmith_*_amd64.deb out/
+          # Free the payload before upload — 972 MB that nothing downstream needs.
+          rm -rf dist/CellSmith build
+          ls -la out/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: out/*
+          if-no-files-found: error
+          compression-level: 0    # both are already compressed
+
+  build-windows:
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v7
+      # Shared composite action, identical to the one the PR gate runs. It has
+      # already asserted the zip AND the installer exist — build.bat only WARNS
+      # when ISCC is missing, and that assertion belongs where the gate sees it.
+      - uses: ./.github/actions/build-windows
+      - name: Collect the artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          mv dist/CellSmith-v*-win64.zip out/
+          mv dist/CellSmith-v*-setup.exe out/
+          rm -rf dist/CellSmith build
+          ls -la out/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: out/*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    needs: [version, build-linux, build-windows]
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: List and sanity-check the artifacts
+        # GitHub caps an individual release asset at 2 GiB (up to 1000 assets per
+        # release; no cap on the release total). Our largest is ~500 MB, but assert
+        # it so a future payload growth fails here rather than at upload.
+        run: |
+          set -euo pipefail
+          ls -la artifacts/
+          limit=$((2 * 1024 * 1024 * 1024))
+          fail=0
+          for f in artifacts/*; do
+            size=$(stat -c%s "$f")
+            printf '  %-52s %6s MiB\n' "$(basename "$f")" "$((size / 1024 / 1024))"
+            if [ "$size" -ge "$limit" ]; then
+              echo "::error::$(basename "$f") is $((size / 1024 / 1024)) MiB — GitHub's per-asset limit is 2 GiB"
+              fail=1
+            fi
+          done
+          # Exactly the four shipped artifacts, no more, no fewer.
+          for pattern in 'CellSmith-v*-win64.zip' 'CellSmith-v*-setup.exe' \
+                         'CellSmith-v*-linux-x86_64.tar.gz' 'cellsmith_*_amd64.deb'; do
+            if ! compgen -G "artifacts/$pattern" > /dev/null; then
+              echo "::error::missing expected release asset: $pattern"
+              fail=1
+            fi
+          done
+          exit $fail
+      - name: Create and push tag
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Assign-then-test, not `| grep -q` — see the note in the `version` job.
+          existing=$(git ls-remote --tags origin "refs/tags/$TAG")
+          if [ -n "$existing" ]; then
+            echo "Tag $TAG already exists on remote — reusing"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          files: artifacts/*
+          fail_on_unmatched_files: true
+      - name: Create dev/X.Y staging branch for this line
+        env:
+          DEV: dev/${{ needs.version.outputs.minor }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # Seeded from the first *stable* release of the line so it never lags
+          # release/X.Y at a prerelease commit.
+          if [ "$PRERELEASE" = "true" ]; then
+            echo "::notice::${{ needs.version.outputs.tag }} is a prerelease — $DEV is created on the first stable release, skipping"
+            exit 0
+          fi
+          existing=$(git ls-remote --heads origin "refs/heads/$DEV")   # see the `version` job
+          if [ -n "$existing" ]; then
+            echo "::notice::$DEV already exists — leaving it untouched"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git push origin "HEAD:refs/heads/$DEV"
+            echo "::notice::Created $DEV at $GITHUB_SHA"
+          fi
